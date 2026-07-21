@@ -52,6 +52,35 @@ class TabularSpectrum:
     periods: tuple[float, ...]
     accels: tuple[float, ...]
 
+    @property
+    def Ts(self) -> float:
+        """Effective corner period Ts for the short-period magnification Rd.
+
+        Derived from the ARS curve using the code's own definitions
+        (AASHTO SGS §4.3.3 / Article 3.5):
+
+            SDS = 0.9 · max(Sa)            (90% of the peak Sa)
+            SD1 = 0.9 · max(T·Sa)          (90% of the peak spectral velocity,
+                                            over the 1–5 s window)
+            Ts  = SD1 / SDS = max(T·Sa | 1..5 s) / max(Sa)
+
+        The 0.9 factors cancel, so no site-class input is needed.  The 1–5 s
+        window is the softer-site (more conservative) range of §3.5; it captures
+        long-period velocity peaks that a 1–2 s window would miss.
+        """
+        peak_sa = max(self.accels)
+        if peak_sa <= 0.0:
+            return 0.0
+        # sample T·Sa over the 1–5 s window at the nodes and a fine grid so an
+        # interpolated peak between nodes is not missed.
+        t_hi = min(5.0, self.periods[-1])
+        if t_hi < 1.0:
+            return 0.0
+        grid = [1.0 + 0.05 * i for i in range(int((t_hi - 1.0) / 0.05) + 1)]
+        grid += [t for t in self.periods if 1.0 <= t <= t_hi]
+        max_tsa = max(t * self.Sa(t) for t in grid)
+        return max_tsa / peak_sa
+
     def Sa(self, T: float) -> float:
         """Spectral acceleration (g) at period ``T`` (s) by linear interpolation."""
         p = self.periods
@@ -99,6 +128,8 @@ class DemandResult:
     mass: float           # tributary mass, kip*s^2/in
     disp_elastic: float = 0.0   # Dd before short-period magnification, in
     Rd: float = 1.0             # SGS 4.3.3 short-period magnification applied
+    Ts: float = 0.0             # corner period used for Rd (0 if not applied)
+    mu_for_Rd: float = 0.0      # displacement ductility used in the Rd fixed point
 
 
 def short_period_magnification(T: float, Ts: float, mu_d: float) -> float:
@@ -139,7 +170,8 @@ def magnified_demand(demand: DemandResult, spectrum, delta_y: float,
             dd, Rd = dd_new, Rd_new
             break
         dd, Rd = dd_new, Rd_new
-    return replace(demand, disp_demand=dd, disp_elastic=dd_elastic, Rd=Rd)
+    return replace(demand, disp_demand=dd, disp_elastic=dd_elastic, Rd=Rd,
+                   Ts=Ts, mu_for_Rd=dd / delta_y)
 
 
 def displacement_demand(

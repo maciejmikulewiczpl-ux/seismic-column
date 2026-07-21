@@ -231,16 +231,29 @@ def size_shaft(column: ColumnDesign, shaft_start: ColumnDesign, ctx: _Ctx) -> Co
     shaft = replace(shaft_start)
 
     # --- longitudinal: smallest that develops the required flexural capacity ---
-    long_ladder = _longitudinal_ladder(shaft, spec)
+    # The Type II shaft is capacity-protected (not ductility-limited).  Escalate
+    # only as needed: conventional single-layer bars first, then add #18, then
+    # allow bundling — up to the 0.04 "compression member" max (SGS 8.8.1 /
+    # SDC 5.3.9.1).  This keeps a conventional cage unless heavy steel is forced.
+    augmented = tuple(sorted(set(spec.bar_numbers) | {14, 18}))
+    tiers = ((spec.bar_numbers, False), (augmented, False), (augmented, True))
     chosen = None
-    for n, b, bundle in long_ladder:
-        cand = replace(shaft, n_bars=n, long_bar_no=b, long_bundle=bundle)
-        if _plastic_moment(cand, P_col) >= m_demand:
-            chosen = cand
+    for bars, bundle_ok in tiers:
+        ladder = _longitudinal_ladder(
+            shaft, replace(spec, bar_numbers=bars, allow_bundling=bundle_ok))
+        for n, b, bundle in ladder:
+            cand = replace(shaft, n_bars=n, long_bar_no=b, long_bundle=bundle)
+            if _plastic_moment(cand, P_col) >= m_demand:
+                chosen = cand
+                break
+        if chosen is not None:
             break
-    if chosen is None and long_ladder:                # exhausted -> use the heaviest
-        n, b, bundle = long_ladder[-1]
-        chosen = replace(shaft, n_bars=n, long_bar_no=b, long_bundle=bundle)
+    if chosen is None:                                # exhausted -> heaviest option
+        ladder = _longitudinal_ladder(
+            shaft, replace(spec, bar_numbers=augmented, allow_bundling=True))
+        if ladder:
+            n, b, bundle = ladder[-1]
+            chosen = replace(shaft, n_bars=n, long_bar_no=b, long_bundle=bundle)
     if chosen is not None:
         shaft = chosen
 

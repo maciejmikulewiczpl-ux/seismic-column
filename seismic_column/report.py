@@ -42,6 +42,39 @@ def _find(checks, name):
     return next((c for c in checks if c.name == name), None)
 
 
+def _add_rd_derivation(add, a) -> None:
+    """Explain the SGS 4.3.3 short-period magnification when it is applied.
+
+    Shows Ts / T* and the Rd fixed-point result for each bound that is actually
+    magnified (Rd > 1); otherwise states why Rd = 1.
+    """
+    magnified = [b for b in a.bounds if b.demand.Rd > 1.0 + 1e-9]
+    if not magnified:
+        add("*Rd = 1.0 for every bound: not short-period (T ≥ T\\* = 1.25·Ts), "
+            "or essentially elastic (μd → 1), or a tabular spectrum with no "
+            "resolvable corner period.*")
+        add("")
+        return
+    add("**Short-period magnification (SGS 4.3.3) — how Δd was increased:**")
+    add("- **Ts** = SD1/SDS, with SDS = 0.9·max(Sa) and SD1 = 0.9·max(T·Sa) over "
+        "1–5 s (the 0.9 factors cancel, so **Ts = max(T·Sa)/max(Sa)**); "
+        r"**T\* = 1.25·Ts**  &nbsp;*[SGS 4.3.3 / Art. 3.5]*")
+    add(r"- **Rd** = (1 − 1/μd)·(T\*/T) + 1/μd, solved with μd = Δd/Δy "
+        "(Rd and μd are interdependent → fixed-point iteration)")
+    for b in magnified:
+        dm = b.demand
+        t_star = 1.25 * dm.Ts
+        _eq(add, f"Rd (mult {b.multiplier:g})",
+            r"(1 − 1/μd)·(T\*/T) + 1/μd",
+            f"(1 − 1/{dm.mu_for_Rd:.2f})·({t_star:.3f}/{dm.period:.3f}) "
+            f"+ 1/{dm.mu_for_Rd:.2f}",
+            f"{dm.Rd:.3f}  (Ts = {dm.Ts:.3f} s, T\\* = {t_star:.3f} s > "
+            f"T = {dm.period:.3f} s)")
+        _eq(add, f"Δd (mult {b.multiplier:g})", "Rd·Δd,elastic",
+            f"{dm.Rd:.3f}·{dm.disp_elastic:.2f}", f"{dm.disp_demand:.2f} in")
+    add("")
+
+
 def _add_concrete_shear(add, sec, d, b, mu_d, P) -> None:
     """vc derivation for whichever shear model ran, symbolic then substituted.
 
@@ -376,9 +409,8 @@ def _detailed_calcs(rr: RowResult) -> list[str]:
     add("- **m** = W/g  ;  **T** = 2π·√(m/k)  ;  "
         "**Δd** = Sa·g·(T/2π)²  (equal-displacement)  ")
     if prov.short_period_magnification:
-        add(f"- **Rd** = (1 − 1/μd)·(T\\*/T) + 1/μd ≥ 1, T\\* = 1.25·Ts  "
-            f"&nbsp;*[{'SGS 4.3.3'}]*  (short-period magnification; "
-            "**Δd** ← Rd·Δd)")
+        add(r"- **Rd** = (1 − 1/μd)·(T\*/T) + 1/μd ≥ 1  (short-period "
+            r"magnification, **Δd ← Rd·Δd**)  &nbsp;*[SGS 4.3.3]*")
     add("")
     add("| mult | k (kip/in) | T = 2π√(m/k) (s) | Sa (g) | Δd,elastic (in) | "
         "Rd | Δd (in) |")
@@ -390,8 +422,10 @@ def _detailed_calcs(rr: RowResult) -> list[str]:
             f"{b.demand.disp_demand:.2f} |")
     add("")
     if not prov.short_period_magnification:
-        add("*Rd not applied — this code has no short-period magnification.*")
+        add("*Rd not applied — Caltrans SDC has no short-period magnification.*")
         add("")
+    else:
+        _add_rd_derivation(add, a)
 
     # governing displacement & ductility demand checks
     add("**Governing displacement checks (worst fixity bound):**")
@@ -498,8 +532,20 @@ def _detailed_calcs(rr: RowResult) -> list[str]:
             f"{sec.rho_s:.4f} ≥ {floor:.3f}", f"{floor*100:.2f}%",
             "SGS 8.6.5-3", status=sec.rho_s >= floor)
     add("")
-    add(f"*Shaft (capacity-protected): ρl = {sh.rho_l*100:.2f}% "
-        f"({s.long_label()}), ρs = {sh.rho_s*100:.2f}% ({s.spiral_label()}).*")
+    add("**Type II shaft reinforcement:**")
+    add(f"- Provided: ρl = **{sh.rho_l*100:.2f}%** ({s.long_label()}), "
+        f"ρs = **{sh.rho_s*100:.2f}%** ({s.spiral_label()}).")
+    add(f"- The Type II shaft is a **capacity-protected** member, not a ductile "
+        f"SCM/column, so the ductile min/max ratios above do **not** apply to it. "
+        f"Its steel is governed by **capacity** — develop γ·Mo in flexure and Vo "
+        f"in shear (§6) — plus the 0.04 \"compression member\" max "
+        f"({'SGS 8.8.1' if not is_ct else 'SDC 5.3.9.1'}). "
+        f"ρl = {sh.rho_l*100:.2f}% ≤ 4.0% → "
+        + ("**OK** ✅" if sh.rho_l <= rho_l_max else "**NG** ❌") + ".")
+    add("- No seismic *minimum* longitudinal ratio is prescribed for the "
+        "capacity-protected shaft; general drilled-shaft minimums come from the "
+        "base bridge-design specifications (AASHTO LRFD / AASHTO-CA BDS §5 & §10), "
+        "which lie outside these seismic provisions and are not evaluated here.")
     add("")
 
     # ------------------------------------------------------------------
