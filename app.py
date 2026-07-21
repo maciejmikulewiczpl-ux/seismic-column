@@ -6,6 +6,9 @@ Run with:
 from __future__ import annotations
 
 import io
+import os
+import subprocess
+import sys
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -85,25 +88,34 @@ def _spectrum_spec(kind: str, sds: float, sd1: float, ars: pd.DataFrame) -> Spec
     return SpectrumSpec(kind="parametric", Sds=sds, Sd1=sd1)
 
 
+def _ss(key):
+    """Session-state value, falling back to the default (never KeyErrors).
+
+    A conditionally-rendered widget (e.g. Sds when the spectrum is tabular) can
+    have its key garbage-collected by Streamlit, so read defensively.
+    """
+    return st.session_state.get(key, _DEFAULTS.get(key))
+
+
 def _build_config() -> GlobalConfig:
-    s = st.session_state
-    design = _spectrum_spec(s["design_kind"], s["design_Sds"], s["design_Sd1"],
-                            s["design_ars"])
+    s = _ss
+    design = _spectrum_spec(s("design_kind"), s("design_Sds"), s("design_Sd1"),
+                            s("design_ars"))
     lle = None
-    if s["lle_enabled"]:
-        lle = _spectrum_spec(s["lle_kind"], s["lle_Sds"], s["lle_Sd1"], s["lle_ars"])
-    priority = tuple(p.strip() for p in s["priority_txt"].split(",") if p.strip())
+    if s("lle_enabled"):
+        lle = _spectrum_spec(s("lle_kind"), s("lle_Sds"), s("lle_Sd1"), s("lle_ars"))
+    priority = tuple(p.strip() for p in s("priority_txt").split(",") if p.strip())
     return GlobalConfig(
-        design_spectrum=design, lle_spectrum=lle, lle_mu_limit=s["lle_mu_limit"],
-        code=s["code"],
-        fye=s["fye"], fue=s["fue"], fyh=s["fyh"], optimize=s["optimize"],
-        priority=priority, variable=tuple(s["variable"]),
-        shaft_moment_basis=s["shaft_basis"], mu_d_limit=s["mu_d_limit"],
-        rho_l_min=s["rho_l_min"], rho_l_max=s["rho_l_max"],
-        min_bar_spacing=s["min_bar_spacing"], allow_bundling=s["allow_bundling"],
-        concrete_unit_weight=s["concrete_unit_weight"],
-        self_weight_mass_factor=s["self_weight_mass_factor"],
-        self_weight_in_axial=s["self_weight_in_axial"],
+        design_spectrum=design, lle_spectrum=lle, lle_mu_limit=s("lle_mu_limit"),
+        code=s("code"),
+        fye=s("fye"), fue=s("fue"), fyh=s("fyh"), optimize=s("optimize"),
+        priority=priority, variable=tuple(s("variable")),
+        shaft_moment_basis=s("shaft_basis"), mu_d_limit=s("mu_d_limit"),
+        rho_l_min=s("rho_l_min"), rho_l_max=s("rho_l_max"),
+        min_bar_spacing=s("min_bar_spacing"), allow_bundling=s("allow_bundling"),
+        concrete_unit_weight=s("concrete_unit_weight"),
+        self_weight_mass_factor=s("self_weight_mass_factor"),
+        self_weight_in_axial=s("self_weight_in_axial"),
     )
 
 
@@ -148,62 +160,118 @@ st.caption("Caltrans SDC 2.1 · Equivalent Static Analysis · Mander confinement
 # ---------------------------------------------------------------------------
 # Project save / open
 # ---------------------------------------------------------------------------
-def _save_to_path() -> None:
-    """Save the whole project (all columns + settings) to project_path, in place."""
-    path = st.session_state["project_path"].strip()
-    if not path:
-        st.session_state["_proj_msg"] = ("error", "Enter a project file path first.")
-        return
+_NATIVE_UNAVAILABLE = (
+    "Couldn't open a native file dialog on this machine. Use the "
+    "**Browser upload / download** section below instead."
+)
+
+
+def _native_file_dialog(mode: str, initial_path: str = "") -> str | None:
+    """Open a native OS file picker and return the chosen path.
+
+    ``mode`` is ``"open"`` or ``"save"``.  The dialog runs in a **subprocess**
+    (its own Tk main loop) so it can't collide with Streamlit's script thread.
+    Only works when the app runs locally (server == the user's machine).
+
+    Returns the selected path, ``""`` if the user cancelled, or ``None`` if the
+    dialog could not be shown (Tk missing, headless/remote session, …).
+    """
+    initial_dir = os.path.dirname(initial_path) if initial_path else os.getcwd()
+    initial_file = (os.path.basename(initial_path) if initial_path
+                    else "seismic_project.json")
+    script = (
+        "import tkinter as tk\n"
+        "from tkinter import filedialog\n"
+        "r = tk.Tk(); r.withdraw(); r.attributes('-topmost', True)\n"
+        "ft = [('Project JSON', '*.json'), ('All files', '*.*')]\n"
+        f"mode, idir, ifile = {mode!r}, {initial_dir!r}, {initial_file!r}\n"
+        "if mode == 'open':\n"
+        "    p = filedialog.askopenfilename(title='Open project', filetypes=ft,\n"
+        "        initialdir=idir)\n"
+        "else:\n"
+        "    p = filedialog.asksaveasfilename(title='Save project as', filetypes=ft,\n"
+        "        defaultextension='.json', initialdir=idir, initialfile=ifile)\n"
+        "r.destroy()\n"
+        "import sys; sys.stdout.write(p or '')\n"
+    )
+    try:
+        out = subprocess.run([sys.executable, "-c", script],
+                             capture_output=True, text=True, timeout=300)
+        return out.stdout.strip() if out.returncode == 0 else None
+    except Exception:
+        return None
+
+
+def _do_save(path: str) -> None:
     try:
         save_project(path, st.session_state["batch_df"], _build_config())
+        st.session_state["project_path"] = path
         st.session_state["_proj_msg"] = ("success", f"Saved to {path}")
     except Exception as exc:
         st.session_state["_proj_msg"] = ("error", f"Save failed: {exc}")
 
 
-def _open_from_path() -> None:
-    path = st.session_state["project_path"].strip()
-    if not path:
-        st.session_state["_proj_msg"] = ("error", "Enter a project file path first.")
-        return
+def _do_open(path: str) -> None:
     try:
         df_p, cfg_p = load_project(path)
         _load_project_into_state(df_p, cfg_p)
+        st.session_state["project_path"] = path
         st.session_state["_proj_msg"] = ("success", f"Opened {path}")
     except Exception as exc:
         st.session_state["_proj_msg"] = ("error", f"Open failed: {exc}")
 
 
 st.header("Project")
-st.text_input(
-    "Project file (path on this computer)", key="project_path",
-    placeholder=r"C:\Users\me\Documents\my_bridge.json",
-    help="Used by the in-place **Save** / **Open** buttons. The whole project — "
-         "every column (including optimised designs) plus all settings — is stored "
-         "in this one file. The download / upload controls work without a path.")
+_current = st.session_state.get("project_path", "")
+st.caption(f"📄 Current file: **{_current}**" if _current
+           else "No project file yet — use **Save As…** or **Open…**. The whole "
+                "project (every column, including optimised designs, plus all "
+                "settings) is stored in one `.json` file.")
 
-pc1, pc2, pc3 = st.columns([1, 1, 2])
-with pc1:
-    st.button("💾 Save", type="primary", width="stretch", on_click=_save_to_path,
-              help="Write the project to the file above, in place (no re-download).")
-with pc2:
-    st.button("📂 Open", width="stretch", on_click=_open_from_path,
-              help="Load the project from the file above.")
-with pc3:
-    try:
-        proj_json = project_to_json(st.session_state["batch_df"], _build_config())
-        st.download_button("Save As… (download)", proj_json.encode(),
-                           "seismic_project.json", "application/json",
-                           width="stretch")
-    except Exception as exc:
-        st.warning(f"Fix inputs to enable save: {exc}")
+pc1, pc2, pc3 = st.columns(3)
+save_clicked = pc1.button("💾 Save", type="primary", width="stretch",
+    help="Save all columns + settings to the current project file, in place. "
+         "If none is set yet, you'll be asked where to save.")
+saveas_clicked = pc2.button("💾 Save As…", width="stretch",
+    help="Pick a file name and location, then save.")
+open_clicked = pc3.button("📂 Open…", width="stretch",
+    help="Browse for a project file to open.")
+
+if save_clicked:
+    path = st.session_state.get("project_path") or _native_file_dialog("save")
+    if path:
+        _do_save(path)
+    elif path is None:
+        st.session_state["_proj_msg"] = ("error", _NATIVE_UNAVAILABLE)
+if saveas_clicked:
+    path = _native_file_dialog("save", st.session_state.get("project_path", ""))
+    if path:
+        _do_save(path)
+    elif path is None:
+        st.session_state["_proj_msg"] = ("error", _NATIVE_UNAVAILABLE)
+if open_clicked:
+    path = _native_file_dialog("open", st.session_state.get("project_path", ""))
+    if path:
+        _do_open(path)
+        st.rerun()
+    elif path is None:
+        st.session_state["_proj_msg"] = ("error", _NATIVE_UNAVAILABLE)
 
 msg = st.session_state.pop("_proj_msg", None)
 if msg is not None:
     (st.success if msg[0] == "success" else st.error)(msg[1])
 
-with st.expander("Open from an uploaded file (browser)"):
-    proj_up = st.file_uploader("Open project (.json)", type=["json"], key="proj_up")
+with st.expander("Browser upload / download (if not running locally)"):
+    try:
+        proj_json = project_to_json(st.session_state["batch_df"], _build_config())
+        st.download_button(
+            "Download project (.json)", proj_json.encode(),
+            os.path.basename(_current) or "seismic_project.json",
+            "application/json")
+    except Exception as exc:
+        st.warning(f"Fix inputs to enable download: {exc}")
+    proj_up = st.file_uploader("Upload project (.json)", type=["json"],
+                               key="proj_up")
     if proj_up is not None and not st.session_state.get("_proj_loaded"):
         try:
             df_p, cfg_p = project_from_json(proj_up.getvalue().decode("utf-8"))
