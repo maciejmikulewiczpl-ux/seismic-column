@@ -40,6 +40,10 @@ code; see [seismic_column/provisions.py](seismic_column/provisions.py).
   diameter → f'c) with user-selectable fixed/variable parameters.
 - **Batch tabular** workflow (editable table + CSV/Excel import/export), results
   grid, per-column drill-down with M-φ and spectrum plots, and Markdown reports.
+- **Project files** (`.json`) store every column *and* all settings in one file.
+  After an optimiser run the optimised column/shaft designs (including bundles)
+  are written back into the table, and an in-place **Save** button persists that
+  progress to the current project file — no "save as" each time.
 
 ## Units
 

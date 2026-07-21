@@ -23,6 +23,14 @@ class RowResult:
     log: list[str]
 
 
+def _bundle(row: pd.Series, key: str) -> int:
+    """Read a bundle-count column, defaulting to 1 for older tables/NaN."""
+    val = row.get(key, 1)
+    if val is None or pd.isna(val):
+        return 1
+    return max(1, int(val))
+
+
 def _row_to_inputs(row: pd.Series, cfg: GlobalConfig):
     _prov = get_provisions(cfg.code)
     fce_factor, fce_floor = _prov.fce_factor, _prov.fce_floor
@@ -31,16 +39,20 @@ def _row_to_inputs(row: pd.Series, cfg: GlobalConfig):
     column = ColumnDesign(
         D=float(row["Dcol_in"]), fc=float(row["fc_ksi"]), cover=float(row["cover_in"]),
         n_bars=int(row["n_bars"]), long_bar_no=int(row["long_bar_no"]),
+        long_bundle=_bundle(row, "long_bundle"),
         spiral_bar_no=int(row["spiral_bar_no"]),
         spiral_spacing=float(row["spiral_spacing_in"]),
+        spiral_bundle=_bundle(row, "spiral_bundle"),
         fye=cfg.fye, fue=cfg.fue, fyh=cfg.fyh, fce_factor=fce_factor, fce_floor=fce_floor,
     )
     shaft = ColumnDesign(
         D=float(row["D_shaft_in"]), fc=float(row["shaft_fc_ksi"]),
         cover=float(row["shaft_cover_in"]), n_bars=int(row["shaft_n_bars"]),
         long_bar_no=int(row["shaft_long_bar_no"]),
+        long_bundle=_bundle(row, "shaft_long_bundle"),
         spiral_bar_no=int(row["shaft_spiral_bar_no"]),
         spiral_spacing=float(row["shaft_spiral_spacing_in"]),
+        spiral_bundle=_bundle(row, "shaft_spiral_bundle"),
         fye=cfg.fye, fue=cfg.fue, fyh=cfg.fyh, fce_factor=fce_factor, fce_floor=fce_floor,
     )
     mults = (float(row["mult_lb"]), float(row["mult_ub"]))
@@ -112,6 +124,45 @@ def run_batch(df: pd.DataFrame, cfg: GlobalConfig) -> tuple[pd.DataFrame, list[R
         results.append(rr)
         summary_rows.append(_summary_row(rr))
     return pd.DataFrame(summary_rows), results
+
+
+# Batch-table column <- ColumnDesign attribute, for the column and the shaft.
+_COL_DESIGN_MAP = {
+    "Dcol_in": "D", "fc_ksi": "fc", "cover_in": "cover", "n_bars": "n_bars",
+    "long_bar_no": "long_bar_no", "long_bundle": "long_bundle",
+    "spiral_bar_no": "spiral_bar_no", "spiral_spacing_in": "spiral_spacing",
+    "spiral_bundle": "spiral_bundle",
+}
+_SHAFT_DESIGN_MAP = {
+    "shaft_fc_ksi": "fc", "shaft_cover_in": "cover", "shaft_n_bars": "n_bars",
+    "shaft_long_bar_no": "long_bar_no", "shaft_long_bundle": "long_bundle",
+    "shaft_spiral_bar_no": "spiral_bar_no",
+    "shaft_spiral_spacing_in": "spiral_spacing",
+    "shaft_spiral_bundle": "spiral_bundle",
+}
+
+
+def results_to_dataframe(results: list[RowResult],
+                         base_df: pd.DataFrame) -> pd.DataFrame:
+    """Write the (optimised) column + shaft designs back into the batch table.
+
+    Rows are matched by ``name``.  Geometry, reinforcement and bundle columns
+    are overwritten with the design carried by each result so the table becomes
+    the current design of record; loads, height, spectrum-independent inputs
+    and fixity multipliers are left untouched.  Rows with no matching result
+    (e.g. a run error) are left as-is.
+    """
+    df = validate(base_df).copy()
+    by_name = {r.name: r for r in results}
+    for i, name in df["name"].items():
+        rr = by_name.get(str(name))
+        if rr is None:
+            continue
+        for col, attr in _COL_DESIGN_MAP.items():
+            df.at[i, col] = getattr(rr.design, attr)
+        for col, attr in _SHAFT_DESIGN_MAP.items():
+            df.at[i, col] = getattr(rr.shaft, attr)
+    return validate(df)
 
 
 def _summary_row(rr: RowResult) -> dict:

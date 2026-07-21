@@ -35,8 +35,10 @@ COLUMNS: tuple[str, ...] = (
     "cover_in",
     "n_bars",
     "long_bar_no",
+    "long_bundle",
     "spiral_bar_no",
     "spiral_spacing_in",
+    "spiral_bundle",
     "mult_lb",
     "mult_ub",
     # shaft (capacity-protected) reinforcement
@@ -44,8 +46,10 @@ COLUMNS: tuple[str, ...] = (
     "shaft_cover_in",
     "shaft_n_bars",
     "shaft_long_bar_no",
+    "shaft_long_bundle",
     "shaft_spiral_bar_no",
     "shaft_spiral_spacing_in",
+    "shaft_spiral_bundle",
 )
 
 NUMERIC_COLUMNS = tuple(c for c in COLUMNS if c != "name")
@@ -74,8 +78,11 @@ COLUMN_META: dict[str, tuple[str, str]] = {
     "cover_in": ("Column cover (in)", "Clear cover to the spiral/hoop."),
     "n_bars": ("Long. bar count", "Number of longitudinal bars in the column."),
     "long_bar_no": ("Long. bar #", "Longitudinal bar size (US # designation)."),
+    "long_bundle": ("Long. bundle", "Bars per longitudinal bundle (1 = single). "
+                    "Set by the optimiser when bundling is allowed."),
     "spiral_bar_no": ("Spiral bar #", "Transverse spiral/hoop bar size (US #)."),
     "spiral_spacing_in": ("Spiral pitch (in)", "Centre-to-centre spiral pitch."),
+    "spiral_bundle": ("Spiral bundle", "Bars per spiral/hoop bundle (1 = single)."),
     "mult_lb": ("Fixity mult. (upper stiffness)",
                 "Depth-to-fixity = this x shaft dia. Smaller = stiffer "
                 "(upper-bound stiffness). Default 3."),
@@ -86,9 +93,13 @@ COLUMN_META: dict[str, tuple[str, str]] = {
     "shaft_cover_in": ("Shaft cover (in)", "Shaft clear cover to transverse steel."),
     "shaft_n_bars": ("Shaft long. count", "Number of shaft longitudinal bars."),
     "shaft_long_bar_no": ("Shaft long. bar #", "Shaft longitudinal bar size (US #)."),
+    "shaft_long_bundle": ("Shaft long. bundle", "Bars per shaft longitudinal "
+                          "bundle (1 = single)."),
     "shaft_spiral_bar_no": ("Shaft spiral #", "Shaft transverse bar size (US #)."),
     "shaft_spiral_spacing_in": ("Shaft spiral pitch (in)",
                                 "Shaft transverse steel centre-to-centre pitch."),
+    "shaft_spiral_bundle": ("Shaft spiral bundle",
+                            "Bars per shaft spiral/hoop bundle (1 = single)."),
 }
 
 
@@ -130,16 +141,20 @@ def default_row(name: str = "C1") -> dict:
         "cover_in": 2.0,
         "n_bars": 16,
         "long_bar_no": 9,
+        "long_bundle": 1,
         "spiral_bar_no": 5,
         "spiral_spacing_in": 4.0,
+        "spiral_bundle": 1,
         "mult_lb": 3.0,
         "mult_ub": 6.0,
         "shaft_fc_ksi": 4.0,
         "shaft_cover_in": 3.0,
         "shaft_n_bars": 36,
         "shaft_long_bar_no": 11,
+        "shaft_long_bundle": 1,
         "shaft_spiral_bar_no": 6,
         "shaft_spiral_spacing_in": 4.0,
+        "shaft_spiral_bundle": 1,
     }
 
 
@@ -195,8 +210,9 @@ def validate(df: pd.DataFrame, min_shaft_oversize: float = 0.0) -> pd.DataFrame:
 
     for col in NUMERIC_COLUMNS:
         df[col] = pd.to_numeric(df[col], errors="coerce")
-    int_cols = ("n_bars", "long_bar_no", "spiral_bar_no",
-                "shaft_n_bars", "shaft_long_bar_no", "shaft_spiral_bar_no")
+    int_cols = ("n_bars", "long_bar_no", "long_bundle", "spiral_bar_no",
+                "spiral_bundle", "shaft_n_bars", "shaft_long_bar_no",
+                "shaft_long_bundle", "shaft_spiral_bar_no", "shaft_spiral_bundle")
     for col in int_cols:
         df[col] = df[col].round().astype("Int64")
 

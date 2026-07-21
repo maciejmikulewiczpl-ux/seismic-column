@@ -12,15 +12,17 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from seismic_column.batch import RowResult, run_batch
+from seismic_column.batch import RowResult, results_to_dataframe, run_batch
 from seismic_column.demand import SpectrumSpec
 from seismic_column.io_schema import (
     COLUMNS,
     COLUMN_META,
     GlobalConfig,
     default_dataframe,
+    load_project,
     project_from_json,
     project_to_json,
+    save_project,
     validate,
 )
 from seismic_column.optimizer import PARAMETERS
@@ -67,6 +69,8 @@ _DEFAULTS = {
     "concrete_unit_weight": 0.150,
     "self_weight_mass_factor": 1.0 / 3.0,
     "self_weight_in_axial": True,
+    "project_path": "",       # current project file for in-place Save/Open
+    "editor_version": 0,      # bump to force the batch editor to re-init
 }
 for _k, _v in _DEFAULTS.items():
     st.session_state.setdefault(_k, _v)
@@ -106,6 +110,7 @@ def _build_config() -> GlobalConfig:
 def _load_project_into_state(df: pd.DataFrame, cfg: GlobalConfig) -> None:
     s = st.session_state
     s["batch_df"] = df
+    s["editor_version"] = s.get("editor_version", 0) + 1   # re-init the editor
     s["code"] = cfg.code
     ds = cfg.design_spectrum
     s["design_kind"] = ds.kind
@@ -143,9 +148,61 @@ st.caption("Caltrans SDC 2.1 · Equivalent Static Analysis · Mander confinement
 # ---------------------------------------------------------------------------
 # Project save / open
 # ---------------------------------------------------------------------------
+def _save_to_path() -> None:
+    """Save the whole project (all columns + settings) to project_path, in place."""
+    path = st.session_state["project_path"].strip()
+    if not path:
+        st.session_state["_proj_msg"] = ("error", "Enter a project file path first.")
+        return
+    try:
+        save_project(path, st.session_state["batch_df"], _build_config())
+        st.session_state["_proj_msg"] = ("success", f"Saved to {path}")
+    except Exception as exc:
+        st.session_state["_proj_msg"] = ("error", f"Save failed: {exc}")
+
+
+def _open_from_path() -> None:
+    path = st.session_state["project_path"].strip()
+    if not path:
+        st.session_state["_proj_msg"] = ("error", "Enter a project file path first.")
+        return
+    try:
+        df_p, cfg_p = load_project(path)
+        _load_project_into_state(df_p, cfg_p)
+        st.session_state["_proj_msg"] = ("success", f"Opened {path}")
+    except Exception as exc:
+        st.session_state["_proj_msg"] = ("error", f"Open failed: {exc}")
+
+
 st.header("Project")
-pcol1, pcol2 = st.columns([2, 3])
-with pcol1:
+st.text_input(
+    "Project file (path on this computer)", key="project_path",
+    placeholder=r"C:\Users\me\Documents\my_bridge.json",
+    help="Used by the in-place **Save** / **Open** buttons. The whole project — "
+         "every column (including optimised designs) plus all settings — is stored "
+         "in this one file. The download / upload controls work without a path.")
+
+pc1, pc2, pc3 = st.columns([1, 1, 2])
+with pc1:
+    st.button("💾 Save", type="primary", width="stretch", on_click=_save_to_path,
+              help="Write the project to the file above, in place (no re-download).")
+with pc2:
+    st.button("📂 Open", width="stretch", on_click=_open_from_path,
+              help="Load the project from the file above.")
+with pc3:
+    try:
+        proj_json = project_to_json(st.session_state["batch_df"], _build_config())
+        st.download_button("Save As… (download)", proj_json.encode(),
+                           "seismic_project.json", "application/json",
+                           width="stretch")
+    except Exception as exc:
+        st.warning(f"Fix inputs to enable save: {exc}")
+
+msg = st.session_state.pop("_proj_msg", None)
+if msg is not None:
+    (st.success if msg[0] == "success" else st.error)(msg[1])
+
+with st.expander("Open from an uploaded file (browser)"):
     proj_up = st.file_uploader("Open project (.json)", type=["json"], key="proj_up")
     if proj_up is not None and not st.session_state.get("_proj_loaded"):
         try:
@@ -158,13 +215,6 @@ with pcol1:
             st.error(f"Could not load project: {exc}")
     if proj_up is None:
         st.session_state["_proj_loaded"] = False
-with pcol2:
-    try:
-        proj_json = project_to_json(st.session_state["batch_df"], _build_config())
-        st.download_button("Save project (.json)", proj_json.encode(),
-                           "seismic_project.json", "application/json")
-    except Exception as exc:
-        st.warning(f"Fix inputs to enable save: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -282,7 +332,7 @@ for c in COLUMNS:
 
 edited = st.data_editor(
     st.session_state["batch_df"], num_rows="dynamic", width="stretch",
-    key="editor", column_config=col_config,
+    key=f"editor_{st.session_state['editor_version']}", column_config=col_config,
 )
 st.session_state["batch_df"] = edited
 
@@ -301,12 +351,21 @@ with col_b:
 # Run
 # ---------------------------------------------------------------------------
 st.header("2 · Run")
+if cfg.optimize:
+    st.caption("Optimised column & shaft designs are written back into the table "
+               "above after each run, so a **Save** captures the current progress.")
 if st.button("Run batch", type="primary"):
     with st.spinner("Analysing…"):
         try:
             summary, results = run_batch(edited, cfg)
             st.session_state["summary"] = summary
             st.session_state["results"] = results
+            if cfg.optimize and results:
+                # Fold the optimised designs back into the table so the batch
+                # is the current design of record and Save persists progress.
+                st.session_state["batch_df"] = results_to_dataframe(results, edited)
+                st.session_state["editor_version"] += 1
+                st.rerun()
         except Exception as exc:
             st.error(f"Run failed: {exc}")
 
