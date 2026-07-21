@@ -24,6 +24,8 @@ class RowResult:
 
 
 def _row_to_inputs(row: pd.Series, cfg: GlobalConfig):
+    _prov = get_provisions(cfg.code)
+    fce_factor, fce_floor = _prov.fce_factor, _prov.fce_floor
     geometry = Geometry(Hcol=float(row["Hcol_ft"]) * 12.0,
                         D_shaft=float(row["D_shaft_in"]))
     column = ColumnDesign(
@@ -31,7 +33,7 @@ def _row_to_inputs(row: pd.Series, cfg: GlobalConfig):
         n_bars=int(row["n_bars"]), long_bar_no=int(row["long_bar_no"]),
         spiral_bar_no=int(row["spiral_bar_no"]),
         spiral_spacing=float(row["spiral_spacing_in"]),
-        fye=cfg.fye, fue=cfg.fue, fyh=cfg.fyh,
+        fye=cfg.fye, fue=cfg.fue, fyh=cfg.fyh, fce_factor=fce_factor, fce_floor=fce_floor,
     )
     shaft = ColumnDesign(
         D=float(row["D_shaft_in"]), fc=float(row["shaft_fc_ksi"]),
@@ -39,7 +41,7 @@ def _row_to_inputs(row: pd.Series, cfg: GlobalConfig):
         long_bar_no=int(row["shaft_long_bar_no"]),
         spiral_bar_no=int(row["shaft_spiral_bar_no"]),
         spiral_spacing=float(row["shaft_spiral_spacing_in"]),
-        fye=cfg.fye, fue=cfg.fue, fyh=cfg.fyh,
+        fye=cfg.fye, fue=cfg.fue, fyh=cfg.fyh, fce_factor=fce_factor, fce_floor=fce_floor,
     )
     mults = (float(row["mult_lb"]), float(row["mult_ub"]))
     return geometry, column, shaft, mults
@@ -51,6 +53,12 @@ def run_row(row: pd.Series, cfg: GlobalConfig) -> RowResult:
     spectrum = cfg.design_spectrum.build()
     lle_spectrum = cfg.lle_spectrum.build() if cfg.lle_spectrum else None
     provisions = get_provisions(cfg.code)
+    # The selected code's longitudinal limits govern; a user entry may only be
+    # *stricter*.  Without this the provisions values were never read at all and
+    # the GUI could silently accept rho_l below the code minimum.
+    rho_l_min = max(cfg.rho_l_min, provisions.rho_l_min)
+    rho_l_max = min(cfg.rho_l_max, provisions.rho_l_max)
+    mu_d_limit = min(cfg.mu_d_limit, provisions.mu_d_limit_single)
     axial = float(row["axial_kip"])
     weight = float(row["weight_kip"])
     name = str(row["name"])
@@ -58,7 +66,7 @@ def run_row(row: pd.Series, cfg: GlobalConfig) -> RowResult:
     if cfg.optimize:
         spec = OptimizeSpec(
             variable=set(cfg.variable), priority=tuple(cfg.priority),
-            rho_l_min=cfg.rho_l_min, rho_l_max=cfg.rho_l_max,
+            rho_l_min=rho_l_min, rho_l_max=rho_l_max,
             min_bar_spacing=cfg.min_bar_spacing, allow_bundling=cfg.allow_bundling,
         )
         res: OptimizeResult = optimize_column(
@@ -75,8 +83,8 @@ def run_row(row: pd.Series, cfg: GlobalConfig) -> RowResult:
 
     assessment = evaluate_column(
         column.section(), shaft.section(), geometry, spectrum, axial, weight,
-        fixity_multipliers=mults, mu_d_limit=cfg.mu_d_limit,
-        rho_l_min=cfg.rho_l_min, rho_l_max=cfg.rho_l_max,
+        fixity_multipliers=mults, mu_d_limit=mu_d_limit,
+        rho_l_min=rho_l_min, rho_l_max=rho_l_max,
         shaft_moment_basis=cfg.shaft_moment_basis,
         lle_spectrum=lle_spectrum, lle_mu_limit=cfg.lle_mu_limit,
         concrete_unit_weight=cfg.concrete_unit_weight,
@@ -89,7 +97,7 @@ def run_row(row: pd.Series, cfg: GlobalConfig) -> RowResult:
 
 def run_batch(df: pd.DataFrame, cfg: GlobalConfig) -> tuple[pd.DataFrame, list[RowResult]]:
     """Run the whole batch; return (summary DataFrame, list of RowResult)."""
-    df = validate(df)
+    df = validate(df, get_provisions(cfg.code).min_shaft_oversize)
     results: list[RowResult] = []
     summary_rows: list[dict] = []
     for _, row in df.iterrows():

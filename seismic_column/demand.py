@@ -14,7 +14,7 @@ the equal-displacement assumption:
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from . import G_IN_S2
 
@@ -94,9 +94,52 @@ class SpectrumSpec:
 class DemandResult:
     period: float          # effective period, s
     Sa: float             # spectral acceleration, g
-    disp_demand: float    # displacement demand Dd, in
+    disp_demand: float    # displacement demand Dd, in (incl. Rd if applied)
     stiffness: float      # lateral stiffness used, kip/in
     mass: float           # tributary mass, kip*s^2/in
+    disp_elastic: float = 0.0   # Dd before short-period magnification, in
+    Rd: float = 1.0             # SGS 4.3.3 short-period magnification applied
+
+
+def short_period_magnification(T: float, Ts: float, mu_d: float) -> float:
+    """Short-period displacement magnification Rd (SGS 4.3.3), dimensionless.
+
+    Rd = (1 - 1/mu_D)*(T*/T) + 1/mu_D >= 1.0  for T*/T > 1.0, else 1.0,
+    with T* = 1.25*Ts (Eq. 4.3.3-3).  The equal-displacement assumption breaks
+    down for short-period structures; Rd corrects the elastic estimate.
+    """
+    if T <= 0.0 or Ts <= 0.0 or mu_d <= 0.0:
+        return 1.0
+    T_star = 1.25 * Ts
+    if T_star / T <= 1.0:
+        return 1.0
+    Rd = (1.0 - 1.0 / mu_d) * (T_star / T) + 1.0 / mu_d
+    return max(Rd, 1.0)
+
+
+def magnified_demand(demand: DemandResult, spectrum, delta_y: float,
+                     iterations: int = 25) -> DemandResult:
+    """Apply SGS 4.3.3 to ``demand``, solving the Rd/mu_D circularity.
+
+    Rd depends on mu_D = Dd/delta_y, which itself depends on Rd, so this
+    iterates to a fixed point.  Returns the original result unchanged when the
+    spectrum exposes no ``Ts`` (e.g. a tabular ARS curve) or the structure is
+    not short-period.
+    """
+    Ts = getattr(spectrum, "Ts", None)
+    if Ts is None or delta_y <= 0.0 or demand.period <= 0.0:
+        return demand
+    dd_elastic = demand.disp_demand
+    dd = dd_elastic
+    Rd = 1.0
+    for _ in range(iterations):
+        Rd_new = short_period_magnification(demand.period, Ts, dd / delta_y)
+        dd_new = Rd_new * dd_elastic
+        if abs(dd_new - dd) < 1e-9:
+            dd, Rd = dd_new, Rd_new
+            break
+        dd, Rd = dd_new, Rd_new
+    return replace(demand, disp_demand=dd, disp_elastic=dd_elastic, Rd=Rd)
 
 
 def displacement_demand(

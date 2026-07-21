@@ -54,10 +54,14 @@ class ColumnDesign:
     fue: float = 95.0
     fyh: float = 68.0
     hoops: bool = False
+    fce_factor: float = 1.3     # f'ce = factor * f'c for the section response
+    fce_floor: float | None = None   # Caltrans floors f'ce at 5.0 ksi
 
     def section(self) -> CircularSection:
         return CircularSection(
-            D=self.D, fc=self.fc, cover=self.cover, n_bars=self.n_bars,
+            D=self.D, fc=self.fc, fce_factor=self.fce_factor,
+            fce_floor=self.fce_floor,
+            cover=self.cover, n_bars=self.n_bars,
             long_bar_no=self.long_bar_no, spiral_bar_no=self.spiral_bar_no,
             spiral_spacing=self.spiral_spacing, fye=self.fye, fue=self.fue,
             fyh=self.fyh, hoops=self.hoops,
@@ -195,7 +199,8 @@ _MP_CACHE: dict[tuple, float] = {}
 def _plastic_moment(design: ColumnDesign, axial: float) -> float:
     key = (design.D, design.fc, design.cover, design.n_bars, design.long_bar_no,
            design.long_bundle, design.spiral_bar_no, design.spiral_spacing,
-           design.spiral_bundle, design.fye, design.fue, design.fyh, round(axial, 3))
+           design.spiral_bundle, design.fye, design.fue, design.fyh,
+           design.fce_factor, design.fce_floor, round(axial, 3))
     if key not in _MP_CACHE:
         _MP_CACHE[key] = moment_curvature(design.section(), axial).Mp
     return _MP_CACHE[key]
@@ -219,6 +224,9 @@ def size_shaft(column: ColumnDesign, shaft_start: ColumnDesign, ctx: _Ctx) -> Co
         m_demand = Mo * (ctx.geometry.Hcol + Df) / ctx.geometry.Hcol
     else:
         m_demand = Mo
+    # SGS 8.9 capacity-protection amplification must be applied here too, or the
+    # optimiser sizes for Mo and the check then demands gamma*Mo and fails.
+    m_demand *= ctx.provisions.shaft_demand_factor
 
     shaft = replace(shaft_start)
 
@@ -236,13 +244,17 @@ def size_shaft(column: ColumnDesign, shaft_start: ColumnDesign, ctx: _Ctx) -> Co
     if chosen is not None:
         shaft = chosen
 
-    # --- transverse: smallest that develops the required shear capacity ---
+    # --- transverse: smallest that develops the required shear capacity AND,
+    # for an oversized shaft, the confinement fraction of SGS 8.8.12 ---
+    frac = ctx.provisions.shaft_confinement_fraction
+    rho_s_req = frac * column.section().rho_s if frac is not None else 0.0
     for b, s, bundle in _confinement_ladder(spec):
         cand = replace(shaft, spiral_bar_no=b, spiral_spacing=s, spiral_bundle=bundle)
-        phiVn, _, _ = shear_capacity(cand.section(), P_col, mu_d=1.0,
+        sec = cand.section()
+        phiVn, _, _ = shear_capacity(sec, P_col, mu_d=1.0,
                                      inside_hinge=False,
-                                     vs_max_coeff=ctx.provisions.vs_max_coeff)
-        if phiVn >= Vo:
+                                     provisions=ctx.provisions)
+        if phiVn >= Vo and sec.rho_s >= rho_s_req:
             shaft = cand
             break
     else:
@@ -311,7 +323,7 @@ def optimize_column(
         if state["iters"] >= max_iterations:
             break
         design, assessment = _sweep_parameter(param, design, spec, assess, log,
-                                               state, max_iterations)
+                                               state, max_iterations, ctx)
         if assessment.passed:
             log.append(f"Feasible after adjusting '{param}'.")
             return OptimizeResult(design, state["shaft"], assessment, True,
@@ -323,7 +335,7 @@ def optimize_column(
                           state["iters"], log)
 
 
-def _sweep_parameter(param, design, spec, assess, log, state, max_iterations):
+def _sweep_parameter(param, design, spec, assess, log, state, max_iterations, ctx):
     """Step one parameter along its ladder until the design passes or exhausts."""
     if param == "longitudinal":
         for n, b, bundle in _longitudinal_ladder(design, spec):
@@ -354,6 +366,15 @@ def _sweep_parameter(param, design, spec, assess, log, state, max_iterations):
     if param == "diameter":
         for D in _ascending_from(spec.diameters, design.D):
             if state["iters"] >= max_iterations:
+                break
+            # The shaft must stay oversized or the Type II premise — and with it
+            # SGS 8.9 / 8.8.12 — no longer holds.  Caltrans additionally
+            # requires at least 24 in of oversize (SDC 2.1 §6.2.5.1).
+            D_max = ctx.geometry.D_shaft - ctx.provisions.min_shaft_oversize
+            if D >= D_max:
+                log.append(f"diameter capped at {design.D:g} in (shaft "
+                           f"{ctx.geometry.D_shaft:g} in, min oversize "
+                           f"{ctx.provisions.min_shaft_oversize:g} in)")
                 break
             cand = replace(design, D=D)
             a = assess(cand)

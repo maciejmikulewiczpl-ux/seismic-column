@@ -5,7 +5,51 @@ import math
 
 from .batch import RowResult
 from .materials import bar_area, bar_diameter
-from .sdc_capacity import PHI_SHEAR, shear_capacity
+from .sdc_capacity import (
+    PHI_SHEAR,
+    anchorage_length,
+    caltrans_min_transverse_ratio,
+    shear_breakdown,
+    shear_capacity,
+)
+
+
+def _add_concrete_shear(add, sec, d, b, mu_d, P) -> None:
+    """Write the vc derivation lines for whichever shear model ran."""
+    Ag = sec.Ag
+    if b.model == "aashto":
+        fs_note = (f" → ≤ 0.35 = **{b.fs:.3f}**" if b.fs < b.fs_raw else "")
+        add(f"- Transverse steel stress:  fs = ρs·fyh "
+            f"= {sec.rho_s:.4f}·{d.fyh:.0f} = {b.fs_raw:.3f} ksi{fs_note}  "
+            f"(8.6.2-6)")
+        add(f"- Shear stress adjustment:  α' = fs/0.15 + 3.67 − μΔ "
+            f"= {b.fs:.3f}/0.15 + 3.67 − {mu_d:.2f} = {b.alpha_raw:.2f} "
+            f"→ clamp[0.3, 3.0] = **{b.alpha:.2f}**  (8.6.2-5)")
+        if b.vc == 0.0:
+            add(f"- Axial:  Pc = {P:.0f} kip is not compressive → "
+                f"**vc = 0**  (8.6.2-4)")
+            return
+        add(f"- Axial factor:  1 + Pc/(2·Ag) = 1 + {P:.0f}/(2·{Ag:.0f}) "
+            f"= **{b.axial_factor:.3f}**")
+        add(f"- Concrete stress:  vc = 0.032·α'·(1 + Pc/2Ag)·√f'c "
+            f"= 0.032·{b.alpha:.2f}·{b.axial_factor:.3f}·√{d.fc:.1f} "
+            f"= {b.vc_uncapped:.4f} ksi")
+        add(f"  ≤ min(0.11√f'c, 0.047·α'·√f'c) = {b.vc_cap:.4f} ksi "
+            f"({b.cap_label} governs) → **vc = {b.vc:.4f} ksi**  (8.6.2-3)")
+        return
+
+    # Caltrans SDC 2.1 §5.3.7.2, presented in psi as the clause is written.
+    fc_psi = d.fc * 1000.0
+    add(f"- Ductility factor:  F1 = ρs·fyh/0.15 + 3.67 − μd "
+        f"= {sec.rho_s:.4f}·{d.fyh:.0f}/0.15 + 3.67 − {mu_d:.2f} "
+        f"= {b.alpha_raw:.2f} → clamp[0.3, 3.0] = **{b.alpha:.2f}**")
+    add(f"- Axial factor:  F2 = 1 + P/(2000·Ag) "
+        f"= 1 + {max(P, 0.0)*1000.0:.0f}/(2000·{Ag:.0f}) "
+        f"= {b.axial_factor_raw:.3f} → ≤ 1.5 = **{b.axial_factor:.3f}**")
+    add(f"- Concrete stress:  vc = F1·F2·√f'c "
+        f"= {b.alpha:.2f}·{b.axial_factor:.3f}·√{fc_psi:.0f} "
+        f"= {b.vc_uncapped*1000.0:.0f} psi (≤ 4√f'c = {b.vc_cap*1000.0:.0f}) "
+        f"→ **{b.vc*1000.0:.0f} psi**")
 
 
 def column_report(rr: RowResult) -> str:
@@ -249,53 +293,43 @@ def _detailed_calcs(rr: RowResult) -> list[str]:
         f"= {a.weight_mass:.0f} kip;   m = W/g  (column self-weight W_self "
         f"= {a.W_self:.1f} kip)")
     add("")
-    add("| mult | k (kip/in) | T = 2π√(m/k) (s) | Sa (g) | Δd (in) |")
-    add("|---:|---:|---:|---:|---:|")
+    add("| mult | k (kip/in) | T = 2π√(m/k) (s) | Sa (g) | Δd,elastic (in) | "
+        "Rd | Δd (in) |")
+    add("|---:|---:|---:|---:|---:|---:|---:|")
     for b in a.bounds:
+        de = b.demand.disp_elastic or b.demand.disp_demand
         add(f"| {b.multiplier:g} | {b.stiffness:.1f} | {b.demand.period:.2f} | "
-            f"{b.demand.Sa:.3f} | {b.demand.disp_demand:.2f} |")
+            f"{b.demand.Sa:.3f} | {de:.2f} | {b.demand.Rd:.3f} | "
+            f"{b.demand.disp_demand:.2f} |")
+    add("")
+    if any(b.demand.Rd > 1.0 for b in a.bounds):
+        add("*Rd = short-period displacement magnification (SGS 4.3.3), "
+            "T\\* = 1.25·Ts; solved iteratively with μD.*")
+    else:
+        add("*Rd = 1.0 (SGS 4.3.3): not a short-period structure, or "
+            "essentially elastic (μD → 1).*")
     add("")
 
     # ------------------------------------------------------------------
     add("### 5 · Shear capacity — column")
     add(f"*Ref: {a.provisions.ref_shear}. Inside the plastic hinge; φ = 0.90.*")
     add("")
-    Ag = sec.Ag
-    Ae = 0.8 * Ag
-    fc_psi = d.fc * 1000.0
-    f1_raw = conf.rho_s * d.fyh / 0.15 + 3.67 - mu_d
-    F1 = min(max(f1_raw, 0.3), 3.0)
-    P_lb = max(P, 0.0) * 1000.0
-    f2_raw = 1.0 + P_lb / (2000.0 * Ag)
-    F2 = min(f2_raw, 1.5)
-    vc_cap = 4.0 * math.sqrt(fc_psi)
-    vc_psi = min(F1 * F2 * math.sqrt(fc_psi), vc_cap)
-    Vc = vc_psi / 1000.0 * Ae
-    Dp = conf.ds
-    Vs_uncapped = (math.pi / 2.0) * asp * d.fyh * Dp / d.spiral_spacing
-    vs_cap = a.provisions.vs_max_coeff * math.sqrt(d.fc) * Ae
-    Vs = min(Vs_uncapped, vs_cap)
-    Vn = Vc + Vs
-    phiVn = PHI_SHEAR * Vn
+    b = shear_breakdown(sec, P, mu_d, inside_hinge=True,
+                        provisions=a.provisions)
     Vo = a.Mo / L
-    add(f"- Effective shear area:  Ae = 0.8·Ag = 0.8·{Ag:.0f} = {Ae:.0f} in²")
-    add(f"- Ductility factor:  F1 = ρs·fyh/0.15 + 3.67 − μd "
-        f"= {conf.rho_s:.4f}·{d.fyh:.0f}/0.15 + 3.67 − {mu_d:.2f} = {f1_raw:.2f} "
-        f"→ clamp[0.3, 3.0] = **{F1:.2f}**")
-    add(f"- Axial factor:  F2 = 1 + P/(2000·Ag) = 1 + {P_lb:.0f}/(2000·{Ag:.0f}) "
-        f"= {f2_raw:.3f} → ≤ 1.5 = **{F2:.3f}**")
-    add(f"- Concrete stress:  vc = F1·F2·√f'c = {F1:.2f}·{F2:.3f}·√{fc_psi:.0f} "
-        f"= {F1*F2*math.sqrt(fc_psi):.0f} psi (≤ 4√f'c = {vc_cap:.0f}) → {vc_psi:.0f} psi")
-    add(f"- Concrete shear:  Vc = vc·Ae = {vc_psi:.0f}·{Ae:.0f}/1000 = **{Vc:.1f} kip**")
+    add(f"- Effective shear area:  Ae = 0.8·Ag = 0.8·{sec.Ag:.0f} = {b.Ae:.0f} in²")
+    _add_concrete_shear(add, sec, d, b, mu_d, P)
+    add(f"- Concrete shear:  Vc = vc·Ae = {b.vc:.3f}·{b.Ae:.0f} = **{b.Vc:.1f} kip**")
     add(f"- Transverse shear:  Vs = (π/2)·Asp·fyh·D'/s "
-        f"= (π/2)·{asp:.3f}·{d.fyh:.0f}·{Dp:.2f}/{d.spiral_spacing:g} = {Vs_uncapped:.1f} kip")
+        f"= (π/2)·{asp:.3f}·{d.fyh:.0f}·{conf.ds:.2f}/{d.spiral_spacing:g} "
+        f"= {b.Vs_uncapped:.1f} kip")
     add(f"- Max shear reinf.:  Vs ≤ {a.provisions.vs_max_coeff:g}·√f'c·Ae "
-        f"= {a.provisions.vs_max_coeff:g}·√{d.fc:.1f}·{Ae:.0f} = {vs_cap:.1f} kip "
-        f"→ **Vs = {Vs:.1f} kip**  ({a.provisions.ref_max_shear})")
-    add(f"- Nominal:  Vn = Vc + Vs = {Vn:.1f} kip;  "
-        f"**φVn = {PHI_SHEAR}·Vn = {phiVn:.1f} kip**")
+        f"= {a.provisions.vs_max_coeff:g}·√{d.fc:.1f}·{b.Ae:.0f} = {b.Vs_cap:.1f} kip "
+        f"→ **Vs = {b.Vs:.1f} kip**  ({a.provisions.ref_max_shear})")
+    add(f"- Nominal:  Vn = Vc + Vs = {b.Vn:.1f} kip;  "
+        f"**φVn = {PHI_SHEAR}·Vn = {b.phiVn:.1f} kip**")
     add(f"- Demand:  Vo = Mo/L = {a.Mo:.0f}/{L:.0f} = {Vo:.1f} kip  →  "
-        f"{'OK' if phiVn >= Vo else 'NG'}  (φVn/Vo = {phiVn/Vo:.2f})")
+        f"{'OK' if b.phiVn >= Vo else 'NG'}  (φVn/Vo = {b.phiVn/Vo:.2f})")
     add("")
 
     # ------------------------------------------------------------------
@@ -310,14 +344,20 @@ def _detailed_calcs(rr: RowResult) -> list[str]:
         f"= {a.Mo/12:.0f} kip-ft")
     add(f"- Shaft flexural demand:  interface = Mo = {m_int/12:.0f} kip-ft;  "
         f"fixity-amplified = {m_fix/12:.0f} kip-ft")
+    gamma = a.provisions.shaft_demand_factor
+    if gamma != 1.0:
+        add(f"- Capacity-protection amplification:  γ = {gamma:g} → design "
+            f"demand = {gamma:g}·{m_int/12:.0f} = {gamma*m_int/12:.0f} kip-ft "
+            f"({a.provisions.ref_shaft_capacity})")
     add(f"- Shaft flexural capacity:  Mn,shaft = {a.mc_shaft.Mp/12:.0f} kip-ft "
         f"(from shaft M-φ at P = {a.mc_shaft.axial:.0f} kip; "
         f"{s.long_label()}, {s.spiral_label()})")
     sh = s.section()
     phiVn_s, Vc_s, Vs_s = shear_capacity(sh, a.mc_shaft.axial, mu_d=1.0,
                                          inside_hinge=False,
-                                         vs_max_coeff=a.provisions.vs_max_coeff)
-    add(f"- Shaft shear capacity (F1 = 3.0 outside hinge):  Vc = {Vc_s:.1f}, "
+                                         provisions=a.provisions)
+    label = "α'" if a.provisions.shear_model == "aashto" else "F1"
+    add(f"- Shaft shear capacity ({label} = 3.0 outside hinge):  Vc = {Vc_s:.1f}, "
         f"Vs = {Vs_s:.1f},  φVn,shaft = {phiVn_s:.1f} kip  vs  Vo = {Vo:.1f} kip")
     add("")
 
@@ -341,39 +381,41 @@ def _detailed_calcs(rr: RowResult) -> list[str]:
         f"{'OK' if ok_lmin else 'NG'}")
     add(f"- Maximum:  ρl ≤ {rho_l_max:.3f} ({rho_l_max*100:.1f}%)  →  "
         f"{'OK' if ok_lmax else 'NG'}")
+    if a.provisions.max_tie_spacing_model == "aashto_8.8.9":
+        dbl_r = bar_diameter(d.long_bar_no)
+        l_ac = anchorage_length(dbl_r, d.fye, d.fc, d.long_bundle)
+        add(f"- Required anchorage into cap beam/footing:  ℓac ≥ "
+            f"0.79·dbl·fye/√f'c = {l_ac:.1f} in  (§8.8.4"
+            + (", ×1.2 for 2-bar bundles per §8.8.5" if d.long_bundle == 2 else "")
+            + "). Informational — a column embedded in an *oversized* shaft is "
+            "governed by §8.8.10 instead, which is not evaluated here.")
     add("")
 
     # transverse (confinement / minimum) — code-specific
     Ag = sec.Ag
     Ac = sec.Acore
-    c1 = a.provisions.conf_c1
-    c2 = a.provisions.conf_c2
-    floor = a.provisions.rho_s_min_floor
-    t1 = c1 * (Ag / Ac - 1.0) * d.fc / d.fyh
-    t2 = c2 * d.fc / d.fyh
-    rho_s_min = max(t1, t2, floor)
-    add("**Transverse steel (column spiral/hoop):**")
+    add("**Transverse steel (column spiral/hoop, inside plastic hinge):**")
     add(f"- Provided:  ρs = {sec.rho_s:.4f} = **{sec.rho_s*100:.2f}%**  "
         f"({d.spiral_label()})")
-    if c1 == 0.0 and c2 == 0.0:
-        # constant floor (e.g. AASHTO §8.6.5)
-        add(f"- Minimum:  ρs ≥ {floor:.3f} = {floor*100:.2f}%  "
-            f"→  **{rho_s_min*100:.2f}%**  →  "
-            f"{'OK' if sec.rho_s >= rho_s_min else 'NG'}")
+    if a.provisions.transverse_min_model == "caltrans_table":
+        rho_s_min, in_table, note = caltrans_min_transverse_ratio(
+            d.D, L, sec.rho_l, P, d.fc, sec.Ag)
+        add(f"- Minimum (SDC 2.1 Table 5.3.8.2-1, Ordinary Standard):  {note}")
+        if in_table:
+            add(f"  → ρs,min = **{rho_s_min*100:.2f}%**  →  "
+                f"{'OK' if sec.rho_s >= rho_s_min else 'NG'}")
+        else:
+            add("  → **table does not cover this section**; establish ρs,min "
+                "via the PSDC procedure (μc ≥ 3.0). Check flagged, not certified.")
     else:
-        cand = {"0.45·(Ag/Ac−1)·f'c/fyh": t1, "0.12·f'c/fyh": t2,
-                "floor": floor}
-        gov = max(cand, key=cand.get)
-        add(f"- Minimum:  ρs ≥ max[ {c1:g}·(Ag/Ac − 1)·f'c/fyh ,  "
-            f"{c2:g}·f'c/fyh"
-            + (f" ,  {floor:.3f}" if floor > 0 else "") + " ]")
-        add(f"  = max[ {c1:g}·({Ag:.0f}/{Ac:.0f} − 1)·{d.fc:.1f}/{d.fyh:.0f} ,  "
-            f"{c2:g}·{d.fc:.1f}/{d.fyh:.0f}"
-            + (f" ,  {floor:.3f}" if floor > 0 else "") + " ]")
-        add(f"  = max[ {t1:.4f} , {t2:.4f}"
-            + (f" , {floor:.4f}" if floor > 0 else "")
-            + f" ] = {rho_s_min:.4f} = **{rho_s_min*100:.2f}%**  "
-            f"(governs: {gov})  →  {'OK' if sec.rho_s >= rho_s_min else 'NG'}")
+        c1, c2 = a.provisions.conf_c1, a.provisions.conf_c2
+        floor = a.provisions.rho_s_min_floor
+        t1 = c1 * (Ag / Ac - 1.0) * d.fc / d.fyh
+        t2 = c2 * d.fc / d.fyh
+        rho_s_min = max(t1, t2, floor)
+        add(f"- Minimum (AASHTO SGS §8.6.5):  ρs ≥ {floor:.3f} = "
+            f"{floor*100:.2f}%  →  **{rho_s_min*100:.2f}%**  →  "
+            f"{'OK' if sec.rho_s >= rho_s_min else 'NG'}")
     add("- No ρs maximum on the ratio; spiral pitch is limited by clear-spacing / "
         "detailing, and Vs is capped by the max-shear-reinforcement limit (§5).")
     add("")

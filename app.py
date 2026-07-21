@@ -1,4 +1,4 @@
-"""Streamlit GUI for the circular column seismic optimiser (Caltrans SDC 2.0).
+"""Streamlit GUI for the circular column seismic optimiser (Caltrans SDC 2.1).
 
 Run with:
     streamlit run app.py
@@ -27,7 +27,7 @@ from seismic_column.optimizer import PARAMETERS
 from seismic_column.provisions import PROVISIONS
 from seismic_column.report import column_report
 
-st.set_page_config(page_title="Seismic Column Optimiser (SDC 2.0)", layout="wide")
+st.set_page_config(page_title="Seismic Column Optimiser (SDC 2.1)", layout="wide")
 
 INT_COLS = ("n_bars", "long_bar_no", "spiral_bar_no",
             "shaft_n_bars", "shaft_long_bar_no", "shaft_spiral_bar_no")
@@ -46,7 +46,7 @@ def _default_ars(kind: str) -> pd.DataFrame:
 
 _DEFAULTS = {
     "batch_df": default_dataframe(3),
-    "code": "SDC 2.0",
+    "code": "SDC 2.1",
     "design_kind": "parametric",
     "design_Sds": 1.0, "design_Sd1": 0.6,
     "design_ars": _default_ars("design"),
@@ -137,7 +137,7 @@ def _load_project_into_state(df: pd.DataFrame, cfg: GlobalConfig) -> None:
 
 
 st.title("Circular RC Column on Type II Shaft — Seismic Optimiser")
-st.caption("Caltrans SDC 2.0 · Equivalent Static Analysis · Mander confinement · fibre M-φ")
+st.caption("Caltrans SDC 2.1 · Equivalent Static Analysis · Mander confinement · fibre M-φ")
 
 
 # ---------------------------------------------------------------------------

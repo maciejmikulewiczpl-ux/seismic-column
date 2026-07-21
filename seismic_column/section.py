@@ -31,7 +31,12 @@ class CircularSection:
     D:
         Overall diameter, in.
     fc:
-        Unconfined concrete strength f'c, ksi.
+        Specified (nominal) concrete strength f'c, ksi.  Used for the shear and
+        detailing provisions, which are written on nominal strength.
+    fce_factor:
+        Multiplier giving the *expected* strength f'ce = factor * f'c used for
+        the section response (moment-curvature).  AASHTO SGS 8.4.4-1 requires
+        f'ce >= 1.3 f'c; set to 1.0 to model on nominal strength.
     cover:
         Clear cover to the transverse steel, in.
     n_bars:
@@ -54,6 +59,8 @@ class CircularSection:
 
     D: float = 48.0
     fc: float = 4.0
+    fce_factor: float = 1.3
+    fce_floor: float | None = None
     cover: float = 2.0
     n_bars: int = 20
     long_bar_no: int = 10
@@ -69,6 +76,7 @@ class CircularSection:
 
     # derived geometry / materials
     Ag: float = field(init=False)
+    fce: float = field(init=False)          # expected strength, ksi
     Ast: float = field(init=False)
     rho_l: float = field(init=False)
     ds: float = field(init=False)          # core diameter to spiral centreline
@@ -83,6 +91,11 @@ class CircularSection:
         dbl = bar_diameter(self.long_bar_no)
         dsp = bar_diameter(self.spiral_bar_no)
         self.Ag = math.pi * self.D ** 2 / 4.0
+        # SGS 8.4.4-1 / 8.5: section response uses the *expected* strength.
+        # Caltrans SDC 3.3.6-4 additionally floors f'ce at 5.0 ksi.
+        self.fce = self.fce_factor * self.fc
+        if self.fce_floor is not None:
+            self.fce = max(self.fce, self.fce_floor)
         self.Ast = self.n_bars * self.long_bundle * bar_area(self.long_bar_no)
         self.rho_l = self.Ast / self.Ag
         self.ds = self.D - 2.0 * self.cover - dsp
@@ -91,7 +104,7 @@ class CircularSection:
 
         rho_long_core = self.Ast / self.Acore
         self.confined = ConfinedConcrete(
-            fc=self.fc,
+            fc=self.fce,
             D=self.D,
             cover=self.cover,
             spiral_bar_no=self.spiral_bar_no,
@@ -102,7 +115,7 @@ class CircularSection:
             spiral_bundle=self.spiral_bundle,
         )
         self.rho_s = self.confined.rho_s
-        self.unconfined = UnconfinedConcrete(fc=self.fc)
+        self.unconfined = UnconfinedConcrete(fc=self.fce)
         self.steel = ReinforcingSteel(bar_no=self.long_bar_no, fye=self.fye, fue=self.fue)
 
     # ------------------------------------------------------------------

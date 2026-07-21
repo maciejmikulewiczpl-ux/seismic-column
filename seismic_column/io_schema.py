@@ -99,7 +99,7 @@ class GlobalConfig:
     design_spectrum: SpectrumSpec = field(default_factory=SpectrumSpec)
     lle_spectrum: SpectrumSpec | None = None   # low-level (elastic) earthquake
     lle_mu_limit: float = 1.0
-    code: str = "SDC 2.0"                        # design code provisions key
+    code: str = "SDC 2.1"                        # design code provisions key
     fye: float = 68.0
     fue: float = 95.0
     fyh: float = 68.0
@@ -174,8 +174,13 @@ def write_table(df: pd.DataFrame, path: str | Path) -> None:
         df.to_csv(p, index=False)
 
 
-def validate(df: pd.DataFrame) -> pd.DataFrame:
-    """Validate and normalise a batch table, filling defaults for missing cols."""
+def validate(df: pd.DataFrame, min_shaft_oversize: float = 0.0) -> pd.DataFrame:
+    """Validate and normalise a batch table, filling defaults for missing cols.
+
+    ``min_shaft_oversize`` is the required ``D_shaft - Dcol`` in inches: 0 for
+    AASHTO SGS ("larger in diameter", Owner's discretion) and 24 for Caltrans
+    SDC, whose Type II definition demands at least 24 in.
+    """
     df = df.copy()
     missing_required = {"Hcol_ft", "D_shaft_in", "weight_kip", "axial_kip", "Dcol_in"}
     absent = missing_required - set(df.columns)
@@ -198,6 +203,21 @@ def validate(df: pd.DataFrame) -> pd.DataFrame:
     if df[list(NUMERIC_COLUMNS)].isna().any().any():
         bad = df[df[list(NUMERIC_COLUMNS)].isna().any(axis=1)].index.tolist()
         raise ValueError(f"Non-numeric or missing values in rows: {bad}")
+
+    # An "oversized" (Type II) shaft is by definition larger in diameter than
+    # the column it supports (AASHTO SGS, Section 2 definitions).  The whole
+    # model — hinge held in the column at the top of shaft, capacity protection
+    # per SGS 8.9 / 8.8.12 — depends on it.
+    gap = df["D_shaft_in"] - df["Dcol_in"]
+    bad = df[gap <= max(min_shaft_oversize, 0.0)] if min_shaft_oversize <= 0         else df[gap < min_shaft_oversize]
+    if not bad.empty:
+        need = (f"at least {min_shaft_oversize:g} in larger than"
+                if min_shaft_oversize > 0 else "larger than")
+        rows = ", ".join(
+            f"{r['name']} (shaft {r['D_shaft_in']:g}, column {r['Dcol_in']:g} in)"
+            for _, r in bad.iterrows())
+        raise ValueError(
+            f"Type II shaft diameter must be {need} the column diameter: {rows}")
     return df.reset_index(drop=True)
 
 

@@ -1,12 +1,18 @@
-# Seismic Column Optimiser — Circular RC Columns on Type II Shafts (Caltrans SDC 2.0, ESA)
+# Seismic Column Optimiser — Circular RC Columns on Type II Shafts (Caltrans SDC 2.1 / AASHTO SGS, ESA)
 
 Pure-Python tool with a Streamlit GUI that analyses and optimises **circular
 reinforced-concrete columns supported on Type II (enlarged) shafts** for seismic
-checks per **Caltrans SDC 2.0** using the **Equivalent Static Analysis (ESA)**
-method. It runs a fibre-based **moment-curvature** analysis with **Mander**
-confined concrete, idealises to the **Caltrans bilinear** (φy, Mp, φu), and
-evaluates displacement demand and capacity plus the full suite of SDC checks —
-for a whole **batch** of columns at once.
+checks per **Caltrans SDC 2.1 (Jan 2025)** or the **AASHTO Guide Specifications
+for LRFD Seismic Bridge Design (3rd Ed.)**, using the **Equivalent Static
+Analysis (ESA)** method. It runs a fibre-based **moment-curvature** analysis with
+**Mander** confined concrete, idealises to the **Caltrans bilinear** (φy, Mp, φu),
+and evaluates displacement demand and capacity plus the full suite of SDC checks
+— for a whole **batch** of columns at once.
+
+Code-specific provisions (concrete shear model, minimum transverse reinforcement,
+expected-strength floor, Type II shaft oversize and capacity protection,
+short-period magnification, detailing) all switch consistently with the selected
+code; see [seismic_column/provisions.py](seismic_column/provisions.py).
 
 ## Features
 
@@ -20,9 +26,16 @@ for a whole **batch** of columns at once.
 - Cracked stiffness: column `Ieff = Mp/φy`, shaft `Ieff` from its own M-φ, plus
   gross `Ig` and `Ieff/Ig` ratios.
 - SDC checks: displacement capacity vs demand, displacement-ductility demand,
-  min/max longitudinal & minimum transverse reinforcement, shear (SDC 3.6),
-  P-Δ, minimum lateral strength, and **shaft capacity protection** (flexure &
-  shear against the column overstrength moment `Mo = 1.2 Mp`).
+  min/max longitudinal reinforcement, minimum transverse reinforcement
+  (Caltrans **Table 5.3.8.2-1** lookup, or AASHTO ρs ≥ 0.005), shear, axial-load
+  ratio (`ρdl ≤ 0.15`), P-Δ, minimum lateral strength, detailing (tie/bar
+  spacing), and **shaft capacity protection** (flexure & shear against the column
+  overstrength moment `Mo = 1.2 Mp`).
+- **Code-selectable shear model** — Caltrans SDC 2.0 §3.6.2 (psi form,
+  `F2 ≤ 1.5`, `vc ≤ 4√f'c`) or AASHTO SGS §8.6.2 (ksi form,
+  `vc = 0.032·α'·(1 + Pc/2Ag)·√f'c` capped at `min(0.11√f'c, 0.047α'√f'c)`,
+  with `fs = ρs·fyh ≤ 0.35 ksi` and `vc = 0` under net tension). **SDC D** is
+  assumed, so `μΔ` in `α'` is the computed displacement-ductility demand.
 - Greedy, **priority-ordered optimiser** (default: longitudinal → confinement →
   diameter → f'c) with user-selectable fixed/variable parameters.
 - **Batch tabular** workflow (editable table + CSV/Excel import/export), results
@@ -36,9 +49,13 @@ US customary throughout: **kip, in, ksi**; g = 386.088 in/s². Table inputs use
 ## Install & run
 
 ```powershell
-python -m pip install -r requirements.txt
-streamlit run app.py
+uv venv --python 3.14
+uv pip install -r requirements.txt pytest
+.venv\Scripts\python.exe -m streamlit run app.py
 ```
+
+The system `python` is not on PATH on this machine, so call the venv
+interpreter explicitly (`.venv\Scripts\python.exe`) rather than `python`.
 
 Programmatic use:
 
@@ -51,7 +68,7 @@ summary, results = run_batch(default_dataframe(3), GlobalConfig())
 Run the tests:
 
 ```powershell
-python -m pytest -q
+.venv\Scripts\python.exe -m pytest -q
 ```
 
 ## Key assumptions & modelling choices

@@ -1,7 +1,7 @@
 """seismic_column
 
 Pure-Python tool to analyze and optimize circular reinforced-concrete columns
-supported on Type II (enlarged) shafts for seismic checks per Caltrans SDC 2.0
+supported on Type II (enlarged) shafts for seismic checks per Caltrans SDC 2.1
 using the Equivalent Static Analysis (ESA) method.
 
 Units convention (US customary) used consistently throughout the package:

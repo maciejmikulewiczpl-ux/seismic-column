@@ -5,7 +5,7 @@ concrete, tension positive for steel). Implementations follow:
 
 * Concrete : Mander, Priestley & Park (1988) confined-concrete model, specialised
   for circular sections with spiral or circular-hoop transverse reinforcement.
-* Steel    : Caltrans SDC 2.0 reinforcing-steel model for ASTM A706 bars
+* Steel    : Caltrans SDC 2.1 reinforcing-steel model for ASTM A706 bars
   (elastic / yield-plateau / strain-hardening parabola) using *expected*
   material properties.
 
@@ -51,7 +51,7 @@ def bar_area(bar_no: int) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Reinforcing steel model (Caltrans SDC 2.0, ASTM A706 expected properties)
+# Reinforcing steel model (Caltrans SDC 2.1, ASTM A706 expected properties)
 # ---------------------------------------------------------------------------
 @dataclass
 class ReinforcingSteel:
@@ -84,7 +84,7 @@ class ReinforcingSteel:
 
     @staticmethod
     def _onset_hardening_strain(bar_no: int) -> float:
-        """Onset of strain hardening eps_sh per SDC 2.0 Table (by bar size)."""
+        """Onset of strain hardening eps_sh per SDC 2.1 Table 3.3.3-1 (by bar size)."""
         if bar_no <= 8:
             return 0.0150
         if bar_no == 9:
@@ -97,7 +97,7 @@ class ReinforcingSteel:
 
     @staticmethod
     def _ultimate_strains(bar_no: int) -> tuple[float, float]:
-        """Return (eps_su, reduced eps_su^R) per SDC 2.0 (by bar size)."""
+        """Return (eps_su, reduced eps_su^R) per SDC 2.1 Table 3.3.3-1 (by bar size)."""
         if bar_no <= 10:
             return 0.120, 0.090
         return 0.090, 0.060  # #11 and larger
