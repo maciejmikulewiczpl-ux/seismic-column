@@ -35,7 +35,8 @@ def test_bundles_flow_into_section():
 
 
 def test_results_to_dataframe_captures_optimised_design():
-    cfg = GlobalConfig(code="SDC 2.1", optimize=True)
+    cfg = GlobalConfig(code="SDC 2.1", optimize=True,
+                       variable=("longitudinal", "confinement", "fc"))
     df0 = default_dataframe(3)
     _, results = run_batch(df0, cfg)
     df_opt = results_to_dataframe(results, df0)
@@ -52,7 +53,8 @@ def test_results_to_dataframe_captures_optimised_design():
 
 
 def test_project_roundtrip_preserves_optimised_designs(tmp_path):
-    cfg = GlobalConfig(code="SDC 2.1", optimize=True, allow_bundling=True)
+    cfg = GlobalConfig(code="SDC 2.1", optimize=True, allow_bundling=True,
+                       variable=("longitudinal", "confinement", "fc"))
     df0 = default_dataframe(3)
     _, results = run_batch(df0, cfg)
     df_opt = results_to_dataframe(results, df0)

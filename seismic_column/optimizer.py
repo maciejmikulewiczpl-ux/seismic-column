@@ -107,6 +107,12 @@ class OptimizeSpec:
     # sizes the growth snaps up to.
     min_shaft_oversize: float = 24.0
     shaft_diameters: tuple[float, ...] = tuple(range(36, 181, 6))
+    # objective for the diameter sweep (starts at min diameter + min steel):
+    #   "min_diameter" -> smallest column that works (heavier steel)
+    #   "balanced"     -> smallest column with longitudinal rho_l <= balanced_rho
+    #   "min_steel"    -> the feasible column with the least longitudinal steel
+    objective: str = "balanced"
+    balanced_rho: float = 0.02
 
 
 @dataclass
@@ -198,6 +204,15 @@ def _confinement_ladder(spec: OptimizeSpec) -> list[tuple[int, float, int]]:
 
 def _ascending_from(values: tuple[float, ...], current: float) -> list[float]:
     return [v for v in sorted(values) if v >= current]
+
+
+def _min_steel_design(design: ColumnDesign, spec: OptimizeSpec) -> ColumnDesign:
+    """The lightest longitudinal cage (smallest ladder rung >= rho_l_min)."""
+    ladder = _longitudinal_ladder(design, spec)
+    if not ladder:
+        return design
+    n, b, bundle = ladder[0]
+    return replace(design, n_bars=n, long_bar_no=b, long_bundle=bundle)
 
 
 def required_shaft_diameter(col_D: float, base_shaft_D: float, oversize: float,
@@ -449,28 +464,88 @@ def optimize_column(
             shaft_embed_length=shaft_embed_length, soil_bounds=soil_bounds,
         )
 
-    assessment = assess(design)
-    if assessment.passed:
-        log.append("Starting design already satisfies all checks.")
-        return OptimizeResult(design, state["shaft"], assessment, True,
-                              state["iters"], log)
+    # inner greedy escalates steel/confinement/f'c at a FIXED diameter
+    inner_priority = tuple(p for p in spec.priority if p != "diameter")
 
-    for param in spec.priority:
-        if param not in spec.variable:
-            continue
+    def greedy_fixed(seed: ColumnDesign):
+        """First feasible design at a fixed diameter (or the last if none)."""
+        d, a = seed, assess(seed)
+        if a.passed:
+            return d, a, state["shaft"]
+        for param in inner_priority:
+            if param not in spec.variable:
+                continue
+            if state["iters"] >= max_iterations:
+                break
+            d, a = _sweep_parameter(param, d, spec, assess, log, state,
+                                    max_iterations, ctx)
+            if a.passed:
+                return d, a, state["shaft"]
+        return d, a, state["shaft"]
+
+    # diameter fixed (not a variable): just size steel/confinement/f'c as-is
+    if "diameter" not in spec.variable:
+        d, a, sh = greedy_fixed(design)
+        log.append("Feasible." if a.passed else "Exhausted variable parameters.")
+        return OptimizeResult(d, sh, a, a.passed, state["iters"], log)
+
+    # objective-driven diameter search.  Conceptually: start at the MIN diameter
+    # + MIN steel and grow; each objective wants the SMALLEST diameter whose
+    # min-feasible longitudinal ratio meets a threshold:
+    #   min_diameter -> any feasible;  balanced -> rho_l <= balanced_rho;
+    #   min_steel    -> rho_l at the ~1% floor (a larger column can't use less).
+    # That property is monotonic in diameter (bigger column -> more capacity,
+    # less required steel), so we BINARY-SEARCH the diameter ladder instead of a
+    # linear march — ~log2(N) trial columns rather than a full failing steel
+    # sweep at every too-small size.  Result is identical; far fewer solves.
+    eps = 1e-9
+    diams = sorted(spec.diameters)
+    threshold = {"min_diameter": spec.rho_l_max + 1.0,   # any feasible qualifies
+                 "balanced": spec.balanced_rho + eps,
+                 "min_steel": spec.rho_l_min * 1.02}.get(spec.objective,
+                                                         spec.balanced_rho + eps)
+    probed: dict[int, tuple] = {}
+
+    def probe(i: int) -> tuple:
+        if i not in probed:
+            d, a, sh = greedy_fixed(_min_steel_design(replace(start, D=diams[i]),
+                                                      spec))
+            rho = d.rho_l() if a.passed else float("inf")
+            probed[i] = (d, sh, a, rho)
+            log.append(f"D={diams[i]:g} in: "
+                       + (f"feasible at rho_l={rho:.4f}" if a.passed
+                          else "infeasible"))
+        return probed[i]
+
+    lo, hi, found = 0, len(diams), None
+    while lo < hi:
         if state["iters"] >= max_iterations:
             break
-        design, assessment = _sweep_parameter(param, design, spec, assess, log,
-                                               state, max_iterations, ctx)
-        if assessment.passed:
-            log.append(f"Feasible after adjusting '{param}'.")
-            return OptimizeResult(design, state["shaft"], assessment, True,
-                                  state["iters"], log)
+        mid = (lo + hi) // 2
+        _, _, a, rho = probe(mid)
+        if a.passed and rho <= threshold:
+            found, hi = mid, mid                 # qualifies — try smaller
+        else:
+            lo = mid + 1                         # need a larger column
 
-    feasible = assessment.passed
-    log.append("Exhausted variable parameters." if not feasible else "Feasible.")
-    return OptimizeResult(design, state["shaft"], assessment, feasible,
-                          state["iters"], log)
+    if found is not None:
+        d, sh, a, rho = probed[found]
+        log.append(f"Objective '{spec.objective}': D={d.D:g} in, rho_l={rho:.4f}.")
+        return OptimizeResult(d, sh, a, True, state["iters"], log)
+
+    # threshold never met — fall back to the least-steel feasible column we saw
+    # (probe the largest diameter to be sure it was tried).
+    probe(len(diams) - 1)
+    feas = [v for v in probed.values() if v[2].passed]
+    if feas:
+        d, sh, a, rho = min(feas, key=lambda v: v[3])
+        log.append(f"Threshold not met; least-steel feasible D={d.D:g} in, "
+                   f"rho_l={rho:.4f}.")
+        return OptimizeResult(d, sh, a, True, state["iters"], log)
+
+    d, sh, a, _ = probed[len(diams) - 1]
+    log.append("No feasible design across the diameter ladder.")
+    return OptimizeResult(d, sh, a, False, state["iters"], log)
 
 
 def _sweep_parameter(param, design, spec, assess, log, state, max_iterations, ctx):
@@ -501,22 +576,9 @@ def _sweep_parameter(param, design, spec, assess, log, state, max_iterations, ct
         log.append("confinement maxed")
         return design, assess(design)
 
-    if param == "diameter":
-        # The shaft is grown with the column (assess -> required_shaft_diameter)
-        # so the Type II oversize — and with it SGS 8.9 / 8.8.12 and the Caltrans
-        # 24 in of SDC 2.1 §6.2.5.1 — is preserved without capping the column.
-        for D in _ascending_from(spec.diameters, design.D):
-            if state["iters"] >= max_iterations:
-                break
-            cand = replace(design, D=D)
-            a = assess(cand)
-            design = cand
-            if a.passed:
-                log.append(f"diameter -> {D} in (shaft "
-                           f"{a.shaft_D:g} in)")
-                return design, a
-        log.append("diameter maxed")
-        return design, assess(design)
+    # NB: "diameter" is handled by the objective-driven outer sweep in
+    # optimize_column (which grows the shaft to keep the Type II oversize), not
+    # here — inner_priority excludes it.
 
     if param == "fc":
         for fc in _ascending_from(spec.fc_values, design.fc):

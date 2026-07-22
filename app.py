@@ -79,6 +79,8 @@ _DEFAULTS = {
     "min_bar_spacing": 6.0,
     "allow_bundling": False,
     "min_shaft_oversize_in": 24.0,
+    "optimize_objective": "balanced",
+    "balanced_rho_pct": 2.0,
     "concrete_unit_weight": 0.150,
     "self_weight_mass_factor": 1.0 / 3.0,
     "self_weight_in_axial": True,
@@ -132,6 +134,8 @@ def _build_config() -> GlobalConfig:
         rho_l_min=s("rho_l_min"), rho_l_max=s("rho_l_max"),
         min_bar_spacing=s("min_bar_spacing"), allow_bundling=s("allow_bundling"),
         min_shaft_oversize_in=s("min_shaft_oversize_in"),
+        optimize_objective=s("optimize_objective"),
+        balanced_rho_l=s("balanced_rho_pct") / 100.0,
         concrete_unit_weight=s("concrete_unit_weight"),
         self_weight_mass_factor=s("self_weight_mass_factor"),
         self_weight_in_axial=s("self_weight_in_axial"),
@@ -174,6 +178,8 @@ def _load_project_into_state(df: pd.DataFrame, cfg: GlobalConfig) -> None:
     s["min_bar_spacing"] = cfg.min_bar_spacing
     s["allow_bundling"] = cfg.allow_bundling
     s["min_shaft_oversize_in"] = getattr(cfg, "min_shaft_oversize_in", 24.0)
+    s["optimize_objective"] = getattr(cfg, "optimize_objective", "balanced")
+    s["balanced_rho_pct"] = getattr(cfg, "balanced_rho_l", 0.02) * 100.0
     s["concrete_unit_weight"] = cfg.concrete_unit_weight
     s["self_weight_mass_factor"] = cfg.self_weight_mass_factor
     s["self_weight_in_axial"] = cfg.self_weight_in_axial
@@ -381,6 +387,23 @@ with st.sidebar:
 
     st.subheader("Optimiser")
     st.checkbox("Optimise (else check as-entered)", key="optimize")
+    st.radio(
+        "Objective", ["min_diameter", "balanced", "min_steel"],
+        key="optimize_objective",
+        format_func=lambda v: {"min_diameter": "Smallest column",
+                               "balanced": "Balanced (≤ target steel)",
+                               "min_steel": "Least steel"}[v],
+        help="Search starts at the minimum column diameter + minimum steel and "
+             "grows. **Smallest column**: first size that works (heavier steel). "
+             "**Balanced**: smallest column whose longitudinal steel is ≤ the "
+             "target below. **Least steel**: the feasible column with the lightest "
+             "cage (largest diameter). Least steel scans all diameters, so it is "
+             "the slowest — most so in soil p-y mode.")
+    if st.session_state["optimize_objective"] == "balanced":
+        st.number_input("Target longitudinal steel for balanced (%)", 1.0, 4.0,
+                        key="balanced_rho_pct", step=0.25,
+                        help="Balanced returns the smallest column whose "
+                             "longitudinal reinforcement ratio is at or below this.")
     st.multiselect("Variable parameters", list(PARAMETERS), key="variable")
     st.text_input("Priority order (comma-separated)", key="priority_txt")
     st.number_input("Min longitudinal bar spacing (in)", 3.0, 12.0,

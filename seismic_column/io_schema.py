@@ -124,6 +124,10 @@ class GlobalConfig:
     min_bar_spacing: float = 6.0        # min c/c longitudinal spacing, in
     allow_bundling: bool = False        # allow 2-bar longitudinal bundles
     min_shaft_oversize_in: float = 24.0  # optimiser keeps shaft >= column + this
+    # optimiser objective (diameter sweep from min diameter + min steel):
+    # "min_diameter" | "balanced" | "min_steel"
+    optimize_objective: str = "balanced"
+    balanced_rho_l: float = 0.02         # target longitudinal ratio for "balanced"
     concrete_unit_weight: float = 0.150  # kcf (kip/ft^3)
     self_weight_mass_factor: float = 1.0 / 3.0   # fraction of col self-wt in seismic mass
     self_weight_in_axial: bool = True    # add col self-wt to axial P

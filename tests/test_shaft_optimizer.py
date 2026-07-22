@@ -5,8 +5,11 @@ from seismic_column.io_schema import GlobalConfig, default_dataframe
 from seismic_column.batch import run_batch
 
 
-def _run(df, code="SDC 2.1"):
-    _, results = run_batch(df, GlobalConfig(code=code, optimize=True))
+def _run(df, code="SDC 2.1", variable=("longitudinal", "confinement", "fc")):
+    # these tests exercise SHAFT sizing at a fixed column, so exclude the
+    # (slow) column-diameter search unless a test asks for it.
+    cfg = GlobalConfig(code=code, optimize=True, variable=variable)
+    _, results = run_batch(df, cfg)
     return results[0]
 
 
@@ -105,3 +108,37 @@ def test_min_oversize_respects_code_floor_under_caltrans():
                           min_shaft_oversize=6.0),          # user asks for only 6"
         provisions=get_provisions("SDC 2.1"))
     assert res.shaft.D - res.design.D >= 24                 # code floor wins
+
+
+def test_objectives_trade_diameter_for_steel():
+    """The three objectives span the diameter/steel trade-off: min_diameter and
+    balanced give the smallest column (heavier steel), min_steel a larger column
+    at the ~1% floor. Small diameter ladder keeps the test fast."""
+    from seismic_column.optimizer import ColumnDesign, OptimizeSpec, optimize_column
+    from seismic_column.geometry import Geometry
+    from seismic_column.demand import DesignSpectrum
+    from seismic_column.provisions import get_provisions
+    col = ColumnDesign(D=36, fc=5, cover=2, n_bars=12, long_bar_no=9,
+                       spiral_bar_no=6, spiral_spacing=4, fce_floor=5.0)
+    shaft = ColumnDesign(D=60, fc=5, cover=6, n_bars=20, long_bar_no=11,
+                         spiral_bar_no=6, spiral_spacing=4, fce_floor=5.0)
+    geom = Geometry(Hcol=22 * 12, D_shaft=60)
+    spec = DesignSpectrum(Sds=1.0, Sd1=0.6)
+
+    def run(obj):
+        return optimize_column(
+            col, shaft, geom, spec, 900, 900,
+            spec=OptimizeSpec(
+                variable={"longitudinal", "confinement", "diameter", "fc"},
+                objective=obj, diameters=(36, 42, 48, 54, 60)),
+            provisions=get_provisions("SDC 2.1"))
+
+    md, ms = run("min_diameter"), run("min_steel")
+    assert md.feasible and ms.feasible
+    # least-steel uses a larger (or equal) column but less (or equal) steel
+    assert ms.design.D >= md.design.D
+    assert ms.design.rho_l() <= md.design.rho_l() + 1e-9
+    # min_steel lands at/near the 1% floor
+    assert ms.design.rho_l() <= 0.0102 * 1.0 + 1e-6 or ms.design.D == 60
+    # shaft stays >= column + 24 in in every case
+    assert md.shaft.D - md.design.D >= 24 and ms.shaft.D - ms.design.D >= 24

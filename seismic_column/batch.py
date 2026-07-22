@@ -93,6 +93,7 @@ def run_row(row: pd.Series, cfg: GlobalConfig, on_candidate=None) -> RowResult:
             rho_l_min=rho_l_min, rho_l_max=rho_l_max,
             min_bar_spacing=cfg.min_bar_spacing, allow_bundling=cfg.allow_bundling,
             min_shaft_oversize=cfg.min_shaft_oversize_in,
+            objective=cfg.optimize_objective, balanced_rho=cfg.balanced_rho_l,
         )
         res: OptimizeResult = optimize_column(
             column, shaft, geometry, spectrum, axial, weight, spec=spec,

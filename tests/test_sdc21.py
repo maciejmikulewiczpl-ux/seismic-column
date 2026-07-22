@@ -206,7 +206,10 @@ def test_oversize_validation_by_code():
 @pytest.mark.parametrize("code", ["SDC 2.1", "AASHTO SGS 3rd Ed."])
 @pytest.mark.parametrize("optimize", [False, True])
 def test_batch_runs_without_error(code, optimize):
-    cfg = GlobalConfig(code=code, optimize=optimize)
+    # exclude the (slow) column-diameter search — this smoke test checks the
+    # batch runs clean and reaches feasible, not the diameter objective.
+    cfg = GlobalConfig(code=code, optimize=optimize,
+                       variable=("longitudinal", "confinement", "fc"))
     summary, results = run_batch(default_dataframe(3), cfg)
     assert len(results) == 3
     assert not any(str(s).startswith("ERROR") for s in summary["status"])

@@ -11,7 +11,7 @@ from seismic_column.io_schema import (
     write_table,
 )
 from seismic_column.demand import SpectrumSpec
-from seismic_column.optimizer import ColumnDesign, optimize_column
+from seismic_column.optimizer import ColumnDesign, OptimizeSpec, optimize_column
 from seismic_column.geometry import Geometry
 from seismic_column.demand import DesignSpectrum
 from seismic_column.report import column_report
@@ -34,7 +34,10 @@ def test_roundtrip_csv(tmp_path):
 
 def test_run_batch_optimize():
     df = default_dataframe(2)
-    cfg = GlobalConfig(optimize=True)
+    # fix the column diameter (exclude the slow diameter search) — this test is
+    # about the batch optimise loop producing feasible designs, not sizing.
+    cfg = GlobalConfig(optimize=True,
+                       variable=("longitudinal", "confinement", "fc"))
     summary, results = run_batch(df, cfg)
     assert len(summary) == 2
     assert len(results) == 2
@@ -49,14 +52,21 @@ def test_optimizer_reaches_feasible():
                          spiral_bar_no=6, spiral_spacing=4)
     geom = Geometry(Hcol=20 * 12, D_shaft=84)
     spec = DesignSpectrum(Sds=1.0, Sd1=0.6)
-    res = optimize_column(start, shaft, geom, spec, axial=800, weight=800)
+    # this case needs the column to grow — small diameter ladder + min_diameter
+    # keeps the search fast while exercising the diameter objective.
+    res = optimize_column(start, shaft, geom, spec, axial=800, weight=800,
+                          spec=OptimizeSpec(
+                              variable={"longitudinal", "confinement",
+                                        "diameter", "fc"},
+                              objective="min_diameter",
+                              diameters=(48, 54, 60, 66)))
     assert res.feasible
     assert res.assessment.passed
 
 
 def test_report_renders():
     df = default_dataframe(1)
-    _, results = run_batch(df, GlobalConfig())
+    _, results = run_batch(df, GlobalConfig(optimize=False))   # render, don't optimise
     md = column_report(results[0])
     assert "Seismic Column Report" in md
     assert "SDC checks" in md

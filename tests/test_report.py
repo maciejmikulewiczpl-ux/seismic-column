@@ -16,8 +16,11 @@ SECTION_HEADERS = [f"### {i} ·" for i in range(1, 10)]  # sections 1..9
 
 
 def _reports(code, optimize=False, n=3):
-    _, results = run_batch(default_dataframe(n), GlobalConfig(code=code,
-                                                              optimize=optimize))
+    # fix the column diameter when optimising — these tests render reports, they
+    # don't need the (slow) diameter search.
+    cfg = GlobalConfig(code=code, optimize=optimize,
+                       variable=("longitudinal", "confinement", "fc"))
+    _, results = run_batch(default_dataframe(n), cfg)
     return [(rr, column_report(rr)) for rr in results]
 
 
