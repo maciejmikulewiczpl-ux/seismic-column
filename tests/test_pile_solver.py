@@ -196,3 +196,26 @@ def test_nonfinite_solve_degrades_to_unstable(monkeypatch):
                         _sand(), 500.0)
     assert not sol.stable
     assert np.all(np.isfinite(sol.y))
+
+
+def test_unstable_solve_bails_early(monkeypatch):
+    """A P-Δ-buckling (soft-soil, huge load) solve must bail out well before the
+    max_iter cap instead of grinding every secant pass — the perf guard that
+    keeps a big soil optimise from looking like a crash."""
+    import seismic_column.pile_solver as ps
+    calls = {"n": 0}
+    orig = ps.solve_banded
+
+    def counted(l_and_u, ab, F):
+        calls["n"] += 1
+        return orig(l_and_u, ab, F)
+
+    monkeypatch.setattr(ps, "solve_banded", counted)
+    # very soft soil + very large head force on a slender pile -> runs away
+    soft = SoilProfile((SoilLayer.from_engineering(
+        80, "api_sand", 110, phi_deg=20, k_pci=5, submerged=True),),
+        stiffness_factor=0.1)
+    sol = solve_lateral(240.0, 40 * 12, 5e8, 5e8, 60.0, 8000.0, soft, 6000.0,
+                        max_iter=100)
+    assert not sol.stable
+    assert calls["n"] < 60          # bailed well before the 100-pass cap

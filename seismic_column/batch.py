@@ -59,8 +59,12 @@ def _row_to_inputs(row: pd.Series, cfg: GlobalConfig):
     return geometry, column, shaft, mults
 
 
-def run_row(row: pd.Series, cfg: GlobalConfig) -> RowResult:
-    """Run a single batch row (optimise or evaluate)."""
+def run_row(row: pd.Series, cfg: GlobalConfig, on_candidate=None) -> RowResult:
+    """Run a single batch row (optimise or evaluate).
+
+    ``on_candidate(iters)`` (optional) is forwarded to the optimiser for live
+    within-column progress (a soil p-y optimise can take a while per column).
+    """
     geometry, column, shaft, mults = _row_to_inputs(row, cfg)
     spectrum = cfg.design_spectrum.build()
     lle_spectrum = cfg.lle_spectrum.build() if cfg.lle_spectrum else None
@@ -96,7 +100,7 @@ def run_row(row: pd.Series, cfg: GlobalConfig) -> RowResult:
             concrete_unit_weight=cfg.concrete_unit_weight,
             self_weight_mass_factor=cfg.self_weight_mass_factor,
             self_weight_in_axial=cfg.self_weight_in_axial,
-            provisions=provisions, **soil_kw,
+            provisions=provisions, on_candidate=on_candidate, **soil_kw,
         )
         return RowResult(name, res.design, res.shaft, res.assessment, res.feasible,
                         True, res.log)
@@ -116,12 +120,14 @@ def run_row(row: pd.Series, cfg: GlobalConfig) -> RowResult:
 
 
 def run_batch(df: pd.DataFrame, cfg: GlobalConfig,
-              progress=None) -> tuple[pd.DataFrame, list[RowResult]]:
+              progress=None, on_candidate=None) -> tuple[pd.DataFrame, list[RowResult]]:
     """Run the whole batch; return (summary DataFrame, list of RowResult).
 
     ``progress`` (optional) is a callback invoked after each column with
     ``(done, total, name, status)`` — used by the GUI to show a live progress
-    bar so long soil/optimiser runs don't look like a crash.
+    bar so long soil/optimiser runs don't look like a crash.  ``on_candidate``
+    (optional) ``(name, iters)`` fires per trial design *within* a column, so a
+    single slow (soil p-y) column also shows live movement.
     """
     df = validate(df, get_provisions(cfg.code).min_shaft_oversize)
     total = len(df)
@@ -129,8 +135,9 @@ def run_batch(df: pd.DataFrame, cfg: GlobalConfig,
     summary_rows: list[dict] = []
     for i, (_, row) in enumerate(df.iterrows()):
         name = str(row.get("name", "?"))
+        row_cb = (lambda it, _n=name: on_candidate(_n, it)) if on_candidate else None
         try:
-            rr = run_row(row, cfg)
+            rr = run_row(row, cfg, on_candidate=row_cb)
         except Exception as exc:  # keep the batch going, flag the row
             summary_rows.append({
                 "name": name, "status": f"ERROR: {exc}", "feasible": False,

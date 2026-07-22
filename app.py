@@ -516,7 +516,10 @@ if st.button("Run batch", type="primary"):
     counts = {"PASS": 0, "FAIL": 0, "ERROR": 0}
     t0 = time.time()
 
+    done_rows = {"n": 0}
+
     def _progress(done, total, name, status):
+        done_rows["n"] = done
         counts[status] = counts.get(status, 0) + 1
         rate = (time.time() - t0) / max(done, 1)
         eta = rate * (total - done)
@@ -526,8 +529,17 @@ if st.button("Run batch", type="primary"):
         tally.caption(f"✅ {counts['PASS']} pass · ❌ {counts['FAIL']} fail · "
                       f"⚠️ {counts['ERROR']} error")
 
+    def _on_candidate(name, it):
+        # live movement WITHIN a column (a soil p-y optimise can take a while per
+        # column, and per-row progress alone can't show that it's working).
+        row_i = done_rows["n"] + 1
+        bar.progress(done_rows["n"] / n_total,
+                     text=f"Analysing {row_i}/{n_total} — {name}: "
+                          f"trying design {it}… ({time.time() - t0:.0f}s)")
+
     try:
-        summary, results = run_batch(edited, cfg, progress=_progress)
+        summary, results = run_batch(edited, cfg, progress=_progress,
+                                     on_candidate=_on_candidate)
         bar.progress(1.0, text=f"Done — {n_total} columns in "
                                f"{time.time() - t0:.0f}s")
         st.session_state["summary"] = summary

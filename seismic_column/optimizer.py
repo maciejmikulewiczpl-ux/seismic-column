@@ -223,6 +223,27 @@ def _eff_EI(design: ColumnDesign, axial: float) -> float:
 # ---------------------------------------------------------------------------
 # Shaft capacity-protection sizing
 # ---------------------------------------------------------------------------
+def _bsearch_ladder(shaft: ColumnDesign, ladder, P_col: float,
+                    m_demand: float) -> ColumnDesign | None:
+    """Smallest rung on an Ast-ascending ladder whose Mp >= ``m_demand``.
+
+    Mp is monotonic in steel area, so a binary search finds the boundary in
+    ~log2(n) moment-curvature evaluations instead of scanning every rung — the
+    dominant cost when sizing a large shaft.  Always returns a *passing* rung
+    (or None), so at worst it is one rung heavier than the true minimum.
+    """
+    lo, hi, best = 0, len(ladder), None
+    while lo < hi:
+        mid = (lo + hi) // 2
+        n, b, bundle = ladder[mid]
+        cand = replace(shaft, n_bars=n, long_bar_no=b, long_bundle=bundle)
+        if _plastic_moment(cand, P_col) >= m_demand:
+            best, hi = cand, mid
+        else:
+            lo = mid + 1
+    return best
+
+
 def _size_shaft_longitudinal(shaft: ColumnDesign, m_demand: float,
                              P_col: float, spec: OptimizeSpec) -> ColumnDesign:
     """Smallest longitudinal cage whose Mn >= ``m_demand`` (heaviest if none)."""
@@ -235,10 +256,9 @@ def _size_shaft_longitudinal(shaft: ColumnDesign, m_demand: float,
     for bars, bundle_ok in tiers:
         ladder = _longitudinal_ladder(
             shaft, replace(spec, bar_numbers=bars, allow_bundling=bundle_ok))
-        for n, b, bundle in ladder:
-            cand = replace(shaft, n_bars=n, long_bar_no=b, long_bundle=bundle)
-            if _plastic_moment(cand, P_col) >= m_demand:
-                return cand
+        cand = _bsearch_ladder(shaft, ladder, P_col, m_demand)
+        if cand is not None:
+            return cand
     ladder = _longitudinal_ladder(                    # exhausted -> heaviest
         shaft, replace(spec, bar_numbers=augmented, allow_bundling=True))
     if ladder:
@@ -298,33 +318,36 @@ def size_shaft(column: ColumnDesign, shaft_start: ColumnDesign, ctx: _Ctx) -> Co
     frac = ctx.provisions.shaft_confinement_fraction
     rho_s_req = frac * column.section().rho_s if frac is not None else 0.0
 
+    # 1) size for the INTERFACE demand first (no p-y solve needed).  This alone
+    # covers the multiplier path and gives soil mode a near-final starting cage.
+    shaft = _size_shaft_longitudinal(replace(shaft_start), m_interface, P_col, spec)
+    shaft = _size_shaft_transverse(shaft, Vo, rho_s_req, P_col, ctx.provisions, spec)
+
     soil_mode = ctx.fixity_source == "soil" and ctx.soil_profile is not None
-    EI_col = _eff_EI(column, P_col) if soil_mode else 0.0
+    if not soil_mode:
+        return shaft
+
+    # 2) add the p-y IN-GROUND demand and iterate to a fixed point — the demand
+    # depends on the shaft's own EI (Caltrans SDC 2.1 §C6.2.5.3 iteration).  Steel
+    # raises capacity faster than it stiffens the shaft, and step 1 starts us
+    # close, so this settles in 1-2 passes.  The p-y solves at the converged EI
+    # are shared (cached) with evaluate_column's overstrength solves.
+    EI_col = _eff_EI(column, P_col)
     L_embed = (ctx.shaft_embed_length or
                (ctx.soil_profile.depth if ctx.soil_profile else 0.0))
-
-    shaft = replace(shaft_start)
-    # A single pass covers the interface demand; in soil mode iterate so the
-    # in-ground p-y demand (a function of the shaft's own EI) converges.  Steel
-    # increases capacity faster than it stiffens the shaft, so this settles in a
-    # few passes; the loop is capped and returns the last (conservative) size.
-    for _ in range(6):
-        m_demand, v_demand = m_interface, Vo
-        if soil_mode:
-            EI_shaft = _eff_EI(shaft, P_col)
-            M_ig, V_ig, _ = inground_demand(
-                ctx.geometry.Hcol, L_embed, EI_col, EI_shaft,
-                ctx.geometry.D_shaft, P_col, ctx.soil_profile, Vo, ctx.soil_bounds)
-            m_demand = max(m_demand, gamma * M_ig)
-            v_demand = max(v_demand, V_ig)
+    for _ in range(4):
+        EI_shaft = _eff_EI(shaft, P_col)
+        M_ig, V_ig, _ = inground_demand(
+            ctx.geometry.Hcol, L_embed, EI_col, EI_shaft, ctx.geometry.D_shaft,
+            P_col, ctx.soil_profile, Vo, ctx.soil_bounds)
+        m_demand = max(m_interface, gamma * M_ig)
+        v_demand = max(Vo, V_ig)
         new_shaft = _size_shaft_longitudinal(shaft, m_demand, P_col, spec)
         new_shaft = _size_shaft_transverse(new_shaft, v_demand, rho_s_req, P_col,
                                            ctx.provisions, spec)
         if _same_shaft(new_shaft, shaft):
             return new_shaft
         shaft = new_shaft
-        if not soil_mode:                              # no iteration needed
-            break
     return shaft
 
 
@@ -352,8 +375,14 @@ def optimize_column(
     shaft_embed_length: float | None = None,
     soil_bounds: tuple[float, float] = (2.0, 0.5),
     max_iterations: int = 400,
+    on_candidate=None,
 ) -> OptimizeResult:
-    """Greedy priority-ordered search for a feasible column + shaft design."""
+    """Greedy priority-ordered search for a feasible column + shaft design.
+
+    ``on_candidate(iters)`` (optional) is called once per trial design — used by
+    the GUI to show live progress within a single (possibly slow, soil p-y)
+    column so a long run doesn't look like a crash.
+    """
     spec = spec or OptimizeSpec()
     ctx = _Ctx(geometry, spectrum, axial, weight, fixity_multipliers,
                shaft_moment_basis, lle_spectrum, lle_mu_limit, spec,
@@ -368,6 +397,8 @@ def optimize_column(
         shaft = size_shaft(d, shaft_start, ctx)
         state["shaft"] = shaft
         state["iters"] += 1
+        if on_candidate is not None:
+            on_candidate(state["iters"])
         return evaluate_column(
             d.section(), shaft.section(), geometry, spectrum, axial, weight,
             fixity_multipliers=fixity_multipliers,

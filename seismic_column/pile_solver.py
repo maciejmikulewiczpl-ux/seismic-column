@@ -137,6 +137,8 @@ def solve_lateral(
     u = np.zeros(ndof)
     converged = False
     prev_dv = np.inf
+    runaway = 20.0 * L_total          # deflection beyond this = clearly unstable
+    stall = 0                         # consecutive non-improving iterations
     it = 0
     for it in range(1, max_iter + 1):
         ab = ab0.copy()
@@ -156,6 +158,15 @@ def solve_lateral(
         u = u_new
         v_new = u[0::2]
         dv = np.max(np.abs(v_new - v))
+        # Early bail-outs for the (common, expensive) UNSTABLE cases — a soft
+        # bound that P-Δ-buckles or oscillates would otherwise burn all max_iter
+        # secant passes only to be flagged unstable anyway.  Both leave
+        # converged=False, so the physicality guard returns the flexible sentinel.
+        if np.max(np.abs(v_new)) > runaway:            # deflection running away
+            break
+        stall = stall + 1 if dv >= prev_dv else 0
+        if stall >= 12:                                # not converging (oscillating)
+            break
         # divergence guard: back off the step if the update grows
         r = relax if dv <= prev_dv else max(relax * 0.5, 0.2)
         v = r * v_new + (1.0 - r) * v
