@@ -534,6 +534,11 @@ def optimize_column(
                 seed = _cage_at_ratio(base, spec, target)
                 d, a, sh = greedy_fixed(seed, ("confinement", "fc"))
             else:                                 # min_diameter: escalate steel
+                # NB: a cheap min/max-steel probe does NOT work here — for a
+                # capacity-protected column MORE longitudinal steel raises Mp and
+                # so RAISES the overstrength shear/shaft demand, i.e. both too
+                # little steel (low capacity) AND too much (high demand) fail, so
+                # the feasible band is in the middle.  The steel must be searched.
                 d, a, sh = greedy_fixed(_min_steel_design(base, spec), all_inner)
             probed[i] = (d, sh, a)
             log.append(f"D={diams[i]:g} in: "
