@@ -28,11 +28,13 @@ from seismic_column.io_schema import (
     default_dataframe,
     default_soil_layers,
     load_project,
+    load_soil_preset,
     pile_profile_table,
     project_from_json,
     project_to_json,
     py_curves_table,
     save_project,
+    soil_preset_names,
     validate,
 )
 from seismic_column.optimizer import PARAMETERS
@@ -407,6 +409,21 @@ with st.sidebar:
     st.caption("Assumed = fast, classic bracket. Calculated = enter strata below; "
                "slower but mechanics-based.")
     if st.session_state["fixity_source"] == "soil":
+        _presets = ["—"] + soil_preset_names()
+        pc1, pc2 = st.columns([3, 1])
+        _sel = pc1.selectbox(
+            "Load a preset strata profile", _presets, key="soil_preset_sel",
+            help="Prefills the strata table + groundwater depth from a saved "
+                 "LPile-style profile. Submerged layers already converted to "
+                 "total unit weight; 'Ignore' layers modelled as zero-resistance "
+                 "(elastic k=0). Review every value against your geotech's report.")
+        if pc2.button("Load", key="soil_preset_load") and _sel != "—":
+            _wt, _layers = load_soil_preset(_sel)
+            st.session_state["soil_df"] = pd.DataFrame(_layers)
+            st.session_state["water_table_ft"] = _wt
+            st.session_state["soil_version"] = \
+                st.session_state.get("soil_version", 0) + 1
+            st.rerun()
         st.number_input("Embedded shaft length (ft)", 10.0, 300.0,
                         key="shaft_embed_ft", step=5.0)
         st.number_input("Groundwater depth (ft, below top of shaft)", 0.0, 300.0,

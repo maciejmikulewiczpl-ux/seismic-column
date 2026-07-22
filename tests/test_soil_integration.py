@@ -186,6 +186,35 @@ def test_full_soil_assessment_has_all_checks():
     assert a.governing_bound in a.bounds
 
 
+def test_soil_presets_build_and_solve():
+    """The bundled LPile-style strata presets build valid profiles, the 'Ignore'
+    top layer carries zero p-y resistance, and evaluate_column solves stably."""
+    from seismic_column.io_schema import (
+        SOIL_PROFILE_PRESETS, build_soil_profile, load_soil_preset, GlobalConfig)
+    col, shaft = _sections()
+    df_eq = {}
+    for name in SOIL_PROFILE_PRESETS:
+        wt, layers = load_soil_preset(name)
+        cfg = GlobalConfig(fixity_source="soil", water_table_ft=wt,
+                           soil_layers=tuple(layers))
+        prof = build_soil_profile(cfg)
+        assert prof is not None and len(prof.layers) == len(layers)
+        # 'Ignore' top layer (elastic k=0) gives zero lateral resistance,
+        # but its weight still adds overburden to the layers below it.
+        assert prof.p_of_y(2.5 * 12, 1.0, 84.0) == 0.0
+        assert prof.sigma_v_eff(20 * 12) > 0.0
+        a = evaluate_column(col, shaft, Geometry(Hcol=25 * 12, D_shaft=84),
+                            DesignSpectrum(Sds=1.2, Sd1=0.7), 1500, 1500,
+                            fixity_source="soil", soil_profile=prof,
+                            shaft_embed_length=int(prof.depth))
+        for b in a.bounds:
+            assert b.soil_solution.stable and b.soil_solution.converged
+        df_eq[name] = max(b.fixity_depth for b in a.bounds)
+    # the high-water, liquefied-to-20ft B profile is softer → deeper fixity
+    assert df_eq["SeaTac Piers B2–B18 (GWT 5 ft)"] > \
+        df_eq["SeaTac Piers A8–A11 (GWT 10 ft)"]
+
+
 def test_pile_cache_reuse():
     """A repeated identical evaluation reuses the cached pile solve."""
     from seismic_column import sdc_capacity as sc

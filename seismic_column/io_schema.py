@@ -168,6 +168,58 @@ def default_soil_layers() -> list[dict]:
     ]
 
 
+def _row(layer, py_model, thickness_ft, gamma_pcf, *, su=0.0, eps50=0.0,
+         phi=0.0, k=0.0) -> dict:
+    """Build one strata-table row (all SOIL_COLUMNS keys present)."""
+    return {"layer": layer, "py_model": py_model, "thickness_ft": thickness_ft,
+            "gamma_pcf": gamma_pcf, "su_top_ksf": su, "su_bot_ksf": su,
+            "eps50": eps50, "phi_deg": phi, "k_pci": k}
+
+
+# Named LPile-style strata presets (project profiles).  Submerged layers are
+# entered as TOTAL unit weight = geotech's effective (buoyant) weight + 62.4 pcf,
+# because the app re-applies buoyancy from ``water_table_ft``.  "Ignore" layers
+# (no lateral resistance in LPile) are modelled as ``elastic_subgrade`` with
+# k = 0 — zero p-y reaction, but their weight still counts toward overburden.
+# ``k`` for the medium sand and ``eps50`` for the stiff clay replace LPile
+# "program default" cells with standard values — review against your report.
+SOIL_PROFILE_PRESETS: dict[str, dict] = {
+    "SeaTac Piers A8–A11 (GWT 10 ft)": {
+        "water_table_ft": 10.0,
+        "layers": [
+            _row("1 ignore (0–5 ft)", "elastic_subgrade", 5.0, 120.0),
+            _row("2 sand (Reese)", "api_sand", 5.0, 120.0, phi=32.0, k=50.0),
+            _row("3 sand liquefied", "api_sand", 5.0, 129.4, phi=21.0, k=35.0),
+            _row("4 stiff clay (hard)", "welch_stiff_clay", 115.0, 135.0,
+                 su=10.0, eps50=0.004),
+        ],
+    },
+    "SeaTac Piers B2–B18 (GWT 5 ft)": {
+        "water_table_ft": 5.0,
+        "layers": [
+            _row("1 ignore (0–5 ft)", "elastic_subgrade", 5.0, 120.0),
+            _row("2 sand liquefied", "api_sand", 5.0, 129.4, phi=18.0, k=13.0),
+            _row("3 sand liquefied", "api_sand", 10.0, 129.4, phi=18.0, k=13.0),
+            _row("4 stiff clay", "welch_stiff_clay", 10.0, 135.0,
+                 su=6.0, eps50=0.004),
+            _row("5 stiff clay", "welch_stiff_clay", 90.0, 135.0,
+                 su=8.0, eps50=0.004),
+        ],
+    },
+}
+
+
+def soil_preset_names() -> list[str]:
+    """Names of the available strata presets, for a UI dropdown."""
+    return list(SOIL_PROFILE_PRESETS)
+
+
+def load_soil_preset(name: str) -> tuple[float, list[dict]]:
+    """Return ``(water_table_ft, layers)`` for preset ``name`` (fresh copies)."""
+    p = SOIL_PROFILE_PRESETS[name]
+    return float(p["water_table_ft"]), [dict(r) for r in p["layers"]]
+
+
 def build_soil_profile(cfg: "GlobalConfig"):
     """Build a :class:`~seismic_column.soil.SoilProfile` from the config, or None.
 
