@@ -143,7 +143,17 @@ def solve_lateral(
         for dof, zc, tb in zip(spring_dofs, spring_depth, spring_trib):
             Es = soil.secant_modulus(zc, v[dof // 2], D_shaft)      # kip/in^2
             ab[_BW, dof] += Es * tb                                  # lateral spring
-        u = solve_banded((_BW, _BW), ab, F)
+        # A P-Δ / very-soft-soil candidate can drive Ke - Kg to (near-)singular.
+        # LAPACK then raises LinAlgError (or returns inf/nan). Treat that as an
+        # UNSTABLE analysis — the physicality guard below yields the flexible
+        # sentinel — rather than letting it crash the whole batch row.
+        try:
+            u_new = solve_banded((_BW, _BW), ab, F)
+        except np.linalg.LinAlgError:
+            break
+        if not np.all(np.isfinite(u_new)):
+            break
+        u = u_new
         v_new = u[0::2]
         dv = np.max(np.abs(v_new - v))
         # divergence guard: back off the step if the update grows

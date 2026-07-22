@@ -595,6 +595,18 @@ def evaluate_column(
         lle_spectrum is not None, lle_mu_limit, provisions,
         inground_M, inground_V,
     )
+    # Guard the overstrength-path gap: if every stiffness bound stayed stable but
+    # the (larger) Vo in-ground solve went unstable/singular on all bounds, the
+    # below-ground shaft demand was never established — fail explicitly instead
+    # of silently treating it as zero demand.
+    if (fixity_source == "soil" and soil_profile is not None
+            and inground is None):
+        checks.append(Check(
+            "Shaft in-ground demand (p-y)", 1, 0, False,
+            "overstrength (Vo) p-y solve unstable/singular on all soil bounds — "
+            "the below-ground shaft moment/shear could not be established; "
+            "increase embedment or shaft size, or refine the soil parameters",
+        ))
 
     return ColumnAssessment(
         mc_col=mc_col, mc_shaft=mc_shaft, Lp=Lp, EI_col=EI_col, EI_shaft=EI_shaft,

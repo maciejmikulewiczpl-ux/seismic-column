@@ -164,3 +164,35 @@ def test_soft_soil_high_force_flagged_unstable_not_rigid():
     assert not sol.stable
     assert sol.Df_eq >= 50.0 * 156.0 - 1e-6          # flexible sentinel, not 0
     assert sol.Df_eq > 0.0                            # never a rigid base
+
+
+def test_singular_solve_degrades_to_unstable(monkeypatch):
+    """A singular/failed linear solve must NOT crash — it degrades to the
+    unstable flexible sentinel (like the physicality guard), so a batch row
+    reports a FAILED stability check instead of 'ERROR: singular matrix'."""
+    import seismic_column.pile_solver as ps
+
+    def _raise(*_a, **_k):
+        raise np.linalg.LinAlgError("singular matrix")
+
+    monkeypatch.setattr(ps, "solve_banded", _raise)
+    sol = solve_lateral(198.0, 60 * 12, 3e10, 3e10, 124.0, 1360.0,
+                        _sand(), 500.0)
+    assert not sol.stable and not sol.converged
+    assert sol.Df_eq == pytest.approx(50.0 * 124.0)   # flexible sentinel
+    assert np.all(np.isfinite(sol.y))                 # no nan/inf leaked out
+
+
+def test_nonfinite_solve_degrades_to_unstable(monkeypatch):
+    """If LAPACK returns inf/nan (near-singular) instead of raising, the solver
+    still degrades gracefully rather than propagating non-finite results."""
+    import seismic_column.pile_solver as ps
+
+    def _nan_shaped(l_and_u, ab, F):
+        return np.full_like(F, np.inf)   # correctly-shaped non-finite result
+
+    monkeypatch.setattr(ps, "solve_banded", _nan_shaped)
+    sol = solve_lateral(198.0, 60 * 12, 3e10, 3e10, 124.0, 1360.0,
+                        _sand(), 500.0)
+    assert not sol.stable
+    assert np.all(np.isfinite(sol.y))
