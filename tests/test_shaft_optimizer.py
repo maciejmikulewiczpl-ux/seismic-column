@@ -111,9 +111,10 @@ def test_min_oversize_respects_code_floor_under_caltrans():
 
 
 def test_objectives_trade_diameter_for_steel():
-    """The three objectives span the diameter/steel trade-off: min_diameter and
-    balanced give the smallest column (heavier steel), min_steel a larger column
-    at the ~1% floor. Small diameter ladder keeps the test fast."""
+    """The objectives span the diameter/steel trade-off: min_diameter gives the
+    smallest column (heavier steel), min_steel a larger column at the ~1% floor,
+    and target_steel a column sized to ~the requested ratio.  Small diameter
+    ladder keeps the test fast."""
     from seismic_column.optimizer import ColumnDesign, OptimizeSpec, optimize_column
     from seismic_column.geometry import Geometry
     from seismic_column.demand import DesignSpectrum
@@ -125,12 +126,12 @@ def test_objectives_trade_diameter_for_steel():
     geom = Geometry(Hcol=22 * 12, D_shaft=60)
     spec = DesignSpectrum(Sds=1.0, Sd1=0.6)
 
-    def run(obj):
+    def run(obj, **kw):
         return optimize_column(
             col, shaft, geom, spec, 900, 900,
             spec=OptimizeSpec(
                 variable={"longitudinal", "confinement", "diameter", "fc"},
-                objective=obj, diameters=(36, 42, 48, 54, 60)),
+                objective=obj, diameters=(36, 42, 48, 54, 60), **kw),
             provisions=get_provisions("SDC 2.1"))
 
     md, ms = run("min_diameter"), run("min_steel")
@@ -139,6 +140,39 @@ def test_objectives_trade_diameter_for_steel():
     assert ms.design.D >= md.design.D
     assert ms.design.rho_l() <= md.design.rho_l() + 1e-9
     # min_steel lands at/near the 1% floor
-    assert ms.design.rho_l() <= 0.0102 * 1.0 + 1e-6 or ms.design.D == 60
+    assert ms.design.rho_l() <= 0.0102 or ms.design.D == 60
     # shaft stays >= column + 24 in in every case
     assert md.shaft.D - md.design.D >= 24 and ms.shaft.D - ms.design.D >= 24
+
+    # target_steel holds the cage at ~the requested ratio and finds the smallest
+    # working column; steel sits near (>=) the target, between the two extremes
+    ts = run("target_steel", target_rho=0.015)
+    assert ts.feasible
+    assert 0.015 - 1e-6 <= ts.design.rho_l() <= 0.02      # ~1.5%, not min, not max
+    assert md.design.D <= ts.design.D <= ms.design.D
+
+
+def test_fixed_diameter_objective_minimises_steel_at_entered_size():
+    """'fixed_diameter' keeps the entered column diameter and returns the
+    smallest feasible longitudinal ratio there (no diameter search)."""
+    from seismic_column.optimizer import ColumnDesign, OptimizeSpec, optimize_column
+    from seismic_column.geometry import Geometry
+    from seismic_column.demand import DesignSpectrum
+    from seismic_column.provisions import get_provisions
+    # start with a heavy cage at a chosen 54 in column; optimiser should keep 54
+    # and drop the steel to the minimum that still passes.
+    col = ColumnDesign(D=54, fc=5, cover=2, n_bars=40, long_bar_no=11,
+                       spiral_bar_no=6, spiral_spacing=4, fce_floor=5.0)
+    shaft = ColumnDesign(D=84, fc=5, cover=6, n_bars=24, long_bar_no=11,
+                         spiral_bar_no=6, spiral_spacing=4, fce_floor=5.0)
+    res = optimize_column(
+        col, shaft, Geometry(Hcol=22 * 12, D_shaft=84),
+        DesignSpectrum(Sds=1.0, Sd1=0.6), 900, 900,
+        spec=OptimizeSpec(
+            variable={"longitudinal", "confinement", "diameter", "fc"},
+            objective="fixed_diameter"),
+        provisions=get_provisions("SDC 2.1"))
+    assert res.feasible
+    assert res.design.D == 54                         # diameter untouched
+    assert res.design.rho_l() < col.rho_l()           # steel reduced to minimum
+    assert res.design.rho_l() >= 0.01 - 1e-9          # not below the floor
