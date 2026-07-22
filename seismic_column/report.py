@@ -12,6 +12,7 @@ from .sdc_capacity import (
     shear_breakdown,
     shear_capacity,
 )
+from .soil import davisson_fixity_depth
 
 
 def _eq(add, lhs, symbolic, substitution, result, ref="", status=None) -> None:
@@ -50,6 +51,9 @@ def _add_fixity_source(add, a) -> None:
     in the same symbolic-then-numeric style as the other detailed calcs."""
     Hcol = a.bounds[0].Le - a.bounds[0].fixity_depth
     soil_bounds = [b for b in a.bounds if b.soil_solution is not None]
+    is_ct = a.provisions.shear_model == "caltrans"
+    # AASHTO LRFD equivalent-fixity equations, adopted by Caltrans as AASHTO-CA BDS
+    lrfd_ref = "AASHTO-CA BDS Art. 10.7.3.13.4" if is_ct else "AASHTO LRFD Art. 10.7.3.13.4"
 
     # --- (i) which method + the fixity depth per bound ---
     if not soil_bounds:
@@ -59,14 +63,23 @@ def _add_fixity_source(add, a) -> None:
             _eq(add, f"Df ({b.multiplier:g}× bound)", "mult · D_shaft",
                 f"{b.multiplier:g}·{a.shaft_D or (b.fixity_depth/b.multiplier):.0f}",
                 f"{b.fixity_depth:.0f} in", "3× upper- / 6× lower-bound stiffness")
-        add("An **estimated depth to fixity** is an accepted foundation-modeling "
-            "method for pile bents / drilled shafts (AASHTO SGS Table 5.3.1-1, "
-            "Foundation Modeling Method I & II; §C5.3.1). The closed-form "
-            "depth-to-fixity equations (AASHTO LRFD Art. 10.7.3.13.4) are "
-            "**linear-elastic** and, per §C5.3.1, may not suit large deflections "
-            "without adjusting soil parameters — use the p-y option when the "
-            "shaft is soft/heavily loaded. The 3×/6× bracket spans that "
-            "uncertainty.")
+        if is_ct:
+            add("An **estimated depth to fixity** (or a soil-spring/LPILE lateral "
+                "analysis) is an accepted way to represent shaft flexibility "
+                "(Caltrans SDC 2.1 §6.2.6, §C6.2.5.3). The closed-form "
+                "depth-to-fixity equations (" + lrfd_ref + ") are "
+                "**linear-elastic** and may not suit large deflections without "
+                "adjusting soil parameters — use the p-y option when the shaft is "
+                "soft/heavily loaded. The 3×/6× bracket spans that uncertainty.")
+        else:
+            add("An **estimated depth to fixity** is an accepted foundation-"
+                "modeling method for pile bents / drilled shafts (AASHTO SGS "
+                "Table 5.3.1-1, Foundation Modeling Method I & II; §C5.3.1). The "
+                "closed-form depth-to-fixity equations (" + lrfd_ref + ") are "
+                "**linear-elastic** and, per §C5.3.1, may not suit large "
+                "deflections without adjusting soil parameters — use the p-y "
+                "option when the shaft is soft/heavily loaded. The 3×/6× bracket "
+                "spans that uncertainty.")
         add("")
         return
 
@@ -77,13 +90,19 @@ def _add_fixity_source(add, a) -> None:
         "two-segment cantilever. An upper/lower soil-stiffness bracket (×2 / ×0.5 "
         "on the p-y modulus) replaces the assumed 3×/6× pair. "
         f"&nbsp;*[{_PY_REF}]*")
-    add("This is an AASHTO-sanctioned foundation-modeling method: **soil springs "
-        "based on P-y curves** are explicitly permitted for pile bents / drilled "
-        "shafts (AASHTO SGS Table 5.3.1-1, Foundation Modeling Method II) and "
-        "§C5.3.1 calls them *\"a better representation\"* than an estimated depth "
-        "to fixity, using **secant stiffness** — as done here. Caltrans SDC 2.1 "
-        "§C6.2.5.3 likewise bases the in-ground shaft moment/shear on soil springs "
-        "and notes the shaft-size iteration this analysis performs.")
+    if is_ct:
+        add("This is a code-sanctioned approach: **Caltrans SDC 2.1 §C6.2.5.3** "
+            "bases the in-ground shaft moment/shear on soil springs (p-y curves) "
+            "and notes the shaft-size iteration this analysis performs; lateral "
+            "stability follows §6.2.6, with LPILE as the reference tool. A "
+            "**secant** soil stiffness is used here.")
+    else:
+        add("This is an AASHTO-sanctioned foundation-modeling method: **soil "
+            "springs based on P-y curves** are explicitly permitted for pile "
+            "bents / drilled shafts (AASHTO SGS Table 5.3.1-1, Foundation "
+            "Modeling Method II) and §C5.3.1 calls them *\"a better "
+            "representation\"* than an estimated depth to fixity, using **secant "
+            "stiffness** — as done here.")
     add("")
 
     # --- (ii) applied pile-head forces, clearly prescribed ---
@@ -118,6 +137,45 @@ def _add_fixity_source(add, a) -> None:
             f"k_head={s.head_stiffness:.0f} kip/in",
             f"Df_eq = {b.fixity_depth:.0f} in = {b.multiplier:.1f}·D_shaft")
     add("")
+
+    # --- (iii-b) closed-form linear cross-check (AASHTO LRFD 10.7.3.13.4) ---
+    prof0 = a.soil_profile
+    stable_bounds = [b for b in soil_bounds if b.soil_solution.stable]
+    if prof0 is not None and stable_bounds and a.shaft_D:
+        D = a.shaft_D
+        EI_shaft = a.EI_shaft
+        lf = davisson_fixity_depth(EI_shaft, prof0, D)
+        lo = min(b.fixity_depth for b in stable_bounds)
+        hi = max(b.fixity_depth for b in stable_bounds)
+        add("**Closed-form cross-check** — the code-referenced *linear-elastic* "
+            "equivalent depth to fixity (" + lrfd_ref + ", Davisson & "
+            "Robinson 1965): relative-stiffness length R = (EI/k_h)^¼ (clay) or "
+            "T = (EI/n_h)^⅕ (sand), then Lf ≈ 1.4R / 1.8T on the initial soil "
+            "modulus:")
+        _eq(add, "Lf (closed form, linear)", "1.4·R  or  1.8·T",
+            f"EI_shaft={EI_shaft:.2e} kip-in², initial-modulus profile",
+            f"Lf ≈ {lf:.0f} in = {lf/D:.1f}·D_shaft")
+        add(f"The nonlinear p-y solve gives Df_eq = {lo:.0f}–{hi:.0f} in "
+            f"({lo/D:.1f}–{hi/D:.1f}·D_shaft) versus the closed-form "
+            f"{lf/D:.1f}·D_shaft. **Why they differ** (the two are different "
+            "equivalence definitions, so either can be larger): (1) the closed "
+            "form uses the *initial* (small-strain) soil modulus, the p-y solve "
+            "the **secant** modulus at the actual head force F_y; (2) Davisson's "
+            "depth is calibrated to match a *shear-loaded* pile-head deflection, "
+            "whereas the p-y Df_eq reproduces the full head flexibility including "
+            "the column overturning moment V·Hcol; (3) the closed form collapses "
+            "the layered profile to one equivalent modulus, the p-y solve honors "
+            "each layer; (4) the ×2/×0.5 modulus bracket on Df_eq spans the soil "
+            "stiffness uncertainty the single closed-form value cannot capture. "
+            + ("The linear closed form is only a **sanity check** (same order of "
+               "magnitude confirms the model); the nonlinear p-y (LPILE-equivalent) "
+               "value governs the design, consistent with Caltrans SDC §C6.2.5.3."
+               if is_ct else
+               "Per AASHTO SGS §C5.3.1 the linear equations *\"may not be "
+               "appropriate for large deflections\"* — so the closed form is a "
+               "**sanity check** (same order of magnitude confirms the model), and "
+               "the nonlinear p-y value governs the design."))
+        add("")
 
     # --- (iv) how the p-y curves were developed (per layer) ---
     prof = a.soil_profile

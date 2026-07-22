@@ -101,8 +101,11 @@ def test_soil_report_prescribes_forces_and_py_detail():
     assert "p-y curve development" in t
     assert "In-ground shaft design" in t
     assert "Shaft flexure in-ground" in t
-    # p-y is a code-sanctioned foundation-modeling method (AASHTO SGS FMM II)
-    assert "Table 5.3.1-1" in t and "Foundation Modeling Method II" in t
+    # p-y is a code-sanctioned approach; default code here is Caltrans SDC 2.1
+    assert "C6.2.5.3" in t
+    # closed-form linear cross-check (Davisson / LRFD 10.7.3.13.4) is shown
+    assert "Closed-form cross-check" in t and "10.7.3.13.4" in t
+    assert "Why they differ" in t
 
 
 def test_multiplier_report_states_assumed_source():
@@ -119,8 +122,31 @@ def test_multiplier_report_states_assumed_source():
     t = column_report(RowResult("P1", cd, sd, a, a.passed, False, []))
     assert "Point-of-fixity source: assumed multipliers" in t
     assert "mult · D_shaft" in t
-    # estimated depth to fixity is FMM I/II; note its linear-elastic caveat
-    assert "Table 5.3.1-1" in t and "10.7.3.13.4" in t
+    # estimated depth to fixity is code-accepted; note its linear-elastic caveat
+    # (default code here is Caltrans SDC 2.1 → §6.2.6 + AASHTO-CA BDS 10.7.3.13.4)
+    assert "6.2.6" in t and "10.7.3.13.4" in t
+
+
+def test_aashto_report_cites_sgs_fmm_table():
+    """Under AASHTO SGS provisions the fixity note cites the SGS FMM table, not
+    the Caltrans clauses (code-specific references, no leakage)."""
+    from seismic_column.optimizer import ColumnDesign
+    from seismic_column.batch import RowResult
+    from seismic_column.provisions import get_provisions
+    from seismic_column.report import column_report
+    col, shaft = _sections()
+    a = evaluate_column(col, shaft, Geometry(Hcol=25 * 12, D_shaft=84),
+                        DesignSpectrum(Sds=1.2, Sd1=0.7), 1500, 1500,
+                        fixity_source="soil", soil_profile=_profile("api_sand"),
+                        shaft_embed_length=100 * 12,
+                        provisions=get_provisions("AASHTO SGS 3rd Ed."))
+    cd = ColumnDesign(D=48, fc=4, cover=2, n_bars=24, long_bar_no=11,
+                      spiral_bar_no=6, spiral_spacing=3)
+    sd = ColumnDesign(D=84, fc=4, cover=3, n_bars=40, long_bar_no=11,
+                      spiral_bar_no=6, spiral_spacing=3.5)
+    t = column_report(RowResult("P1", cd, sd, a, a.passed, False, []))
+    assert "Table 5.3.1-1" in t and "Foundation Modeling Method II" in t
+    assert "C6.2.5.3" not in t          # Caltrans clause must not leak in
 
 
 def test_multiplier_mode_has_no_inground():
