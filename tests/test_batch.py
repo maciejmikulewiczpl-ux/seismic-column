@@ -15,6 +15,7 @@ from seismic_column.optimizer import ColumnDesign, optimize_column
 from seismic_column.geometry import Geometry
 from seismic_column.demand import DesignSpectrum
 from seismic_column.report import column_report
+from seismic_column.sdc_capacity import evaluate_column
 
 
 def test_default_dataframe_valid():
@@ -94,3 +95,29 @@ def test_run_batch_progress_callback():
 def test_run_batch_without_callback_unchanged():
     summary, results = run_batch(default_dataframe(2), GlobalConfig(optimize=False))
     assert len(summary) == 2 and len(results) == 2
+
+
+def test_fractional_spacing_writeback_when_input_is_integer():
+    """Regression: a batch table with all-integer spiral spacings makes pandas
+    infer int64; writing a fractional optimiser result (3.5 in pitch) back used
+    to raise "Invalid value '3.5' for dtype 'int64'".  validate() must pin the
+    non-integer design columns to float so results_to_dataframe stays safe."""
+    from seismic_column.batch import RowResult, results_to_dataframe
+
+    df = default_dataframe(1)
+    df.loc[0, ["spiral_spacing_in", "shaft_spiral_spacing_in", "fc_ksi"]] = [4, 4, 5]
+    v = validate(df)
+    assert v["spiral_spacing_in"].dtype == "float64"
+    assert v["shaft_spiral_spacing_in"].dtype == "float64"
+
+    cd = ColumnDesign(D=48, fc=5, cover=2, n_bars=24, long_bar_no=11,
+                      spiral_bar_no=6, spiral_spacing=3.5)
+    sd = ColumnDesign(D=84, fc=5, cover=6, n_bars=40, long_bar_no=11,
+                      spiral_bar_no=6, spiral_spacing=3.5)
+    a = evaluate_column(cd.section(), sd.section(),
+                        Geometry(Hcol=20 * 12, D_shaft=84),
+                        DesignSpectrum(Sds=1.0, Sd1=0.6), 800, 800)
+    rr = RowResult(str(v.loc[0, "name"]), cd, sd, a, a.passed, True, [])
+    out = results_to_dataframe([rr], v)          # must not raise
+    assert out.loc[0, "spiral_spacing_in"] == 3.5
+    assert out.loc[0, "shaft_spiral_spacing_in"] == 3.5

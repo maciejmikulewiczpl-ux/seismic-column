@@ -364,6 +364,14 @@ def validate(df: pd.DataFrame, min_shaft_oversize: float = 0.0) -> pd.DataFrame:
                 "shaft_long_bundle", "shaft_spiral_bar_no", "shaft_spiral_bundle")
     for col in int_cols:
         df[col] = df[col].round().astype("Int64")
+    # Force the non-integer design columns to float.  ``pd.to_numeric`` infers
+    # int64 for an all-whole-number column (e.g. spacings entered as 4, 4, …);
+    # writing a fractional optimiser result back (a 3.5 in spiral pitch, a 4.5 ksi
+    # f'c) into that int64 column then raises "Invalid value '3.5' for dtype
+    # 'int64'".  Pinning them float keeps the write-back safe.
+    for col in NUMERIC_COLUMNS:
+        if col not in int_cols:
+            df[col] = df[col].astype("float64")
 
     if df[list(NUMERIC_COLUMNS)].isna().any().any():
         bad = df[df[list(NUMERIC_COLUMNS)].isna().any(axis=1)].index.tolist()

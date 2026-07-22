@@ -540,18 +540,29 @@ if st.button("Run batch", type="primary"):
     try:
         summary, results = run_batch(edited, cfg, progress=_progress,
                                      on_candidate=_on_candidate)
+    except Exception as exc:
+        st.error(f"Run failed: {exc}")
+    else:
         bar.progress(1.0, text=f"Done — {n_total} columns in "
                                f"{time.time() - t0:.0f}s")
         st.session_state["summary"] = summary
         st.session_state["results"] = results
         if cfg.optimize and results:
             # Fold the optimised designs back into the table so the batch is the
-            # current design of record and Save persists progress.
-            st.session_state["batch_df"] = results_to_dataframe(results, edited)
-            st.session_state["editor_version"] += 1
-            st.rerun()
-    except Exception as exc:
-        st.error(f"Run failed: {exc}")
+            # current design of record and Save persists progress.  A write-back
+            # glitch must NOT read as "Run failed" — the analysis already
+            # succeeded and the results below are valid.  (st.rerun() raises a
+            # control-flow exception, so it stays OUTSIDE the try.)
+            wrote_back = False
+            try:
+                st.session_state["batch_df"] = results_to_dataframe(results, edited)
+                st.session_state["editor_version"] += 1
+                wrote_back = True
+            except Exception as exc:
+                st.warning(f"Results are ready below, but writing the optimised "
+                           f"designs back into the table failed: {exc}")
+            if wrote_back:
+                st.rerun()
 
 
 # ---------------------------------------------------------------------------
