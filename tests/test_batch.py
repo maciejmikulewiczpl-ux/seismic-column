@@ -77,3 +77,20 @@ def test_project_roundtrip():
     assert cfg2.lle_spectrum is not None
     assert abs(cfg2.lle_spectrum.Sds - 0.4) < 1e-9
     assert cfg2.optimize is False
+
+
+def test_run_batch_progress_callback():
+    """The optional progress callback fires once per column with a growing
+    done-count reaching (total, total) and a status label."""
+    calls = []
+    run_batch(default_dataframe(3), GlobalConfig(optimize=False),
+              progress=lambda d, t, name, status: calls.append((d, t, name, status)))
+    assert len(calls) == 3
+    assert [c[0] for c in calls] == [1, 2, 3]          # monotonic done-count
+    assert all(c[1] == 3 for c in calls)                # total
+    assert all(c[3] in ("PASS", "FAIL", "ERROR") for c in calls)
+
+
+def test_run_batch_without_callback_unchanged():
+    summary, results = run_batch(default_dataframe(2), GlobalConfig(optimize=False))
+    assert len(summary) == 2 and len(results) == 2

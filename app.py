@@ -9,6 +9,7 @@ import io
 import os
 import subprocess
 import sys
+import time
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -481,20 +482,41 @@ st.header("2 · Run")
 if cfg.optimize:
     st.caption("Optimised column & shaft designs are written back into the table "
                "above after each run, so a **Save** captures the current progress.")
+if st.session_state["fixity_source"] == "soil":
+    st.caption("⏳ Soil (p-y) analysis solves a nonlinear pile per column "
+               "(more so when optimising), so a large batch can take a minute or "
+               "more — the progress bar below shows it is working.")
 if st.button("Run batch", type="primary"):
-    with st.spinner("Analysing…"):
-        try:
-            summary, results = run_batch(edited, cfg)
-            st.session_state["summary"] = summary
-            st.session_state["results"] = results
-            if cfg.optimize and results:
-                # Fold the optimised designs back into the table so the batch
-                # is the current design of record and Save persists progress.
-                st.session_state["batch_df"] = results_to_dataframe(results, edited)
-                st.session_state["editor_version"] += 1
-                st.rerun()
-        except Exception as exc:
-            st.error(f"Run failed: {exc}")
+    n_total = len(edited)
+    bar = st.progress(0.0, text=f"Starting {n_total} columns…")
+    tally = st.empty()
+    counts = {"PASS": 0, "FAIL": 0, "ERROR": 0}
+    t0 = time.time()
+
+    def _progress(done, total, name, status):
+        counts[status] = counts.get(status, 0) + 1
+        rate = (time.time() - t0) / max(done, 1)
+        eta = rate * (total - done)
+        bar.progress(done / total,
+                     text=f"Analysing {done}/{total} — last: {name} [{status}]"
+                          + (f" · ~{eta:.0f}s left" if done < total else ""))
+        tally.caption(f"✅ {counts['PASS']} pass · ❌ {counts['FAIL']} fail · "
+                      f"⚠️ {counts['ERROR']} error")
+
+    try:
+        summary, results = run_batch(edited, cfg, progress=_progress)
+        bar.progress(1.0, text=f"Done — {n_total} columns in "
+                               f"{time.time() - t0:.0f}s")
+        st.session_state["summary"] = summary
+        st.session_state["results"] = results
+        if cfg.optimize and results:
+            # Fold the optimised designs back into the table so the batch is the
+            # current design of record and Save persists progress.
+            st.session_state["batch_df"] = results_to_dataframe(results, edited)
+            st.session_state["editor_version"] += 1
+            st.rerun()
+    except Exception as exc:
+        st.error(f"Run failed: {exc}")
 
 
 # ---------------------------------------------------------------------------

@@ -115,22 +115,33 @@ def run_row(row: pd.Series, cfg: GlobalConfig) -> RowResult:
     return RowResult(name, column, shaft, assessment, assessment.passed, False, [])
 
 
-def run_batch(df: pd.DataFrame, cfg: GlobalConfig) -> tuple[pd.DataFrame, list[RowResult]]:
-    """Run the whole batch; return (summary DataFrame, list of RowResult)."""
+def run_batch(df: pd.DataFrame, cfg: GlobalConfig,
+              progress=None) -> tuple[pd.DataFrame, list[RowResult]]:
+    """Run the whole batch; return (summary DataFrame, list of RowResult).
+
+    ``progress`` (optional) is a callback invoked after each column with
+    ``(done, total, name, status)`` — used by the GUI to show a live progress
+    bar so long soil/optimiser runs don't look like a crash.
+    """
     df = validate(df, get_provisions(cfg.code).min_shaft_oversize)
+    total = len(df)
     results: list[RowResult] = []
     summary_rows: list[dict] = []
-    for _, row in df.iterrows():
+    for i, (_, row) in enumerate(df.iterrows()):
+        name = str(row.get("name", "?"))
         try:
             rr = run_row(row, cfg)
         except Exception as exc:  # keep the batch going, flag the row
             summary_rows.append({
-                "name": str(row.get("name", "?")), "status": f"ERROR: {exc}",
-                "feasible": False,
+                "name": name, "status": f"ERROR: {exc}", "feasible": False,
             })
+            if progress is not None:
+                progress(i + 1, total, name, "ERROR")
             continue
         results.append(rr)
         summary_rows.append(_summary_row(rr))
+        if progress is not None:
+            progress(i + 1, total, name, "PASS" if rr.feasible else "FAIL")
     return pd.DataFrame(summary_rows), results
 
 
