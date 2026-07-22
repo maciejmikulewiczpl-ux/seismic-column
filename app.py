@@ -395,11 +395,17 @@ with st.sidebar:
 
     st.subheader("Point of fixity")
     st.radio(
-        "Source", ["multiplier", "soil"], key="fixity_source", horizontal=True,
-        help="**multiplier**: assumed Df = 3×/6× shaft diameter (upper/lower "
-             "stiffness). **soil**: nonlinear p-y (LPile-equivalent) analysis of "
-             "the column + shaft on the strata below, giving a mechanics-based "
-             "depth to fixity.")
+        "How is the depth to fixity determined?", ["multiplier", "soil"],
+        key="fixity_source", horizontal=True,
+        format_func=lambda v: {"multiplier": "Assumed 3×/6× multiplier",
+                               "soil": "Calculated (soil p-y)"}[v],
+        help="**Assumed 3×/6× multiplier**: Df = 3× (upper-bound stiffness) and "
+             "6× (lower-bound) × shaft diameter, no soil model. "
+             "**Calculated (soil p-y)**: nonlinear p-y (LPile-equivalent) analysis "
+             "of the column + shaft on the strata below, giving a mechanics-based "
+             "depth to fixity and the in-ground shaft moment/shear.")
+    st.caption("Assumed = fast, classic bracket. Calculated = enter strata below; "
+               "slower but mechanics-based.")
     if st.session_state["fixity_source"] == "soil":
         st.number_input("Embedded shaft length (ft)", 10.0, 300.0,
                         key="shaft_embed_ft", step=5.0)

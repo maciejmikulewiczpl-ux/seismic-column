@@ -77,6 +77,52 @@ def test_inground_shaft_design_present_and_deeper_than_interface():
     assert a.inground_solution.max_moment_depth > 0.0
 
 
+def test_soil_report_prescribes_forces_and_py_detail():
+    """The p-y report section is detailed like the others: prescribes the applied
+    pile-head forces, shows the p-y development, and the in-ground shaft design."""
+    from seismic_column.optimizer import ColumnDesign
+    from seismic_column.batch import RowResult
+    from seismic_column.report import column_report
+    col, shaft = _sections()
+    geom = Geometry(Hcol=25 * 12, D_shaft=84)
+    a = evaluate_column(col, shaft, geom, DesignSpectrum(Sds=1.2, Sd1=0.7),
+                        1500, 1500, fixity_source="soil",
+                        soil_profile=_profile("api_sand"),
+                        shaft_embed_length=100 * 12)
+    cd = ColumnDesign(D=48, fc=4, cover=2, n_bars=24, long_bar_no=11,
+                      spiral_bar_no=6, spiral_spacing=3)
+    sd = ColumnDesign(D=84, fc=4, cover=3, n_bars=40, long_bar_no=11,
+                      spiral_bar_no=6, spiral_spacing=3.5)
+    t = column_report(RowResult("P1", cd, sd, a, a.passed, False, []))
+    assert "Point-of-fixity source: nonlinear p-y" in t
+    assert "Applied pile-head forces" in t
+    assert "F_y" in t and "Mp / Hcol" in t             # stiffness solve force
+    assert "Vo" in t and "Mo / Hcol" in t              # in-ground design force
+    assert "p-y curve development" in t
+    assert "In-ground shaft design" in t
+    assert "Shaft flexure in-ground" in t
+    # p-y is a code-sanctioned foundation-modeling method (AASHTO SGS FMM II)
+    assert "Table 5.3.1-1" in t and "Foundation Modeling Method II" in t
+
+
+def test_multiplier_report_states_assumed_source():
+    from seismic_column.optimizer import ColumnDesign
+    from seismic_column.batch import RowResult
+    from seismic_column.report import column_report
+    col, shaft = _sections()
+    a = evaluate_column(col, shaft, Geometry(Hcol=22 * 12, D_shaft=84),
+                        DesignSpectrum(Sds=1.0, Sd1=0.6), 800, 800)
+    cd = ColumnDesign(D=48, fc=4, cover=2, n_bars=24, long_bar_no=11,
+                      spiral_bar_no=6, spiral_spacing=3)
+    sd = ColumnDesign(D=84, fc=4, cover=3, n_bars=40, long_bar_no=11,
+                      spiral_bar_no=6, spiral_spacing=3.5)
+    t = column_report(RowResult("P1", cd, sd, a, a.passed, False, []))
+    assert "Point-of-fixity source: assumed multipliers" in t
+    assert "mult · D_shaft" in t
+    # estimated depth to fixity is FMM I/II; note its linear-elastic caveat
+    assert "Table 5.3.1-1" in t and "10.7.3.13.4" in t
+
+
 def test_multiplier_mode_has_no_inground():
     col, shaft = _sections()
     geom = Geometry(Hcol=22 * 12, D_shaft=84)

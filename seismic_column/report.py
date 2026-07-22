@@ -42,101 +42,148 @@ def _find(checks, name):
     return next((c for c in checks if c.name == name), None)
 
 
+_PY_REF = "Matlock (1970); API RP-2A / O'Neill–Murchison (1983); Reese et al. (1974)"
+
+
 def _add_fixity_source(add, a) -> None:
-    """Explain how the point of fixity was obtained (manual multiplier or p-y)."""
+    """Explain how the point of fixity was obtained (manual multiplier or p-y),
+    in the same symbolic-then-numeric style as the other detailed calcs."""
+    Hcol = a.bounds[0].Le - a.bounds[0].fixity_depth
     soil_bounds = [b for b in a.bounds if b.soil_solution is not None]
+
+    # --- (i) which method + the fixity depth per bound ---
     if not soil_bounds:
-        add("**Point of fixity:** assumed **manual multipliers** "
-            f"Df = mult × D_shaft = "
-            f"{', '.join(f'{b.multiplier:g}×' for b in a.bounds)} "
-            "(3× upper-bound / 6× lower-bound stiffness, no soil model).")
+        add("**Point-of-fixity source: assumed multipliers** (user-selected). "
+            "No soil model — Df is bracketed as a fraction of the shaft diameter:")
+        for b in a.bounds:
+            _eq(add, f"Df ({b.multiplier:g}× bound)", "mult · D_shaft",
+                f"{b.multiplier:g}·{a.shaft_D or (b.fixity_depth/b.multiplier):.0f}",
+                f"{b.fixity_depth:.0f} in", "3× upper- / 6× lower-bound stiffness")
+        add("An **estimated depth to fixity** is an accepted foundation-modeling "
+            "method for pile bents / drilled shafts (AASHTO SGS Table 5.3.1-1, "
+            "Foundation Modeling Method I & II; §C5.3.1). The closed-form "
+            "depth-to-fixity equations (AASHTO LRFD Art. 10.7.3.13.4) are "
+            "**linear-elastic** and, per §C5.3.1, may not suit large deflections "
+            "without adjusting soil parameters — use the p-y option when the "
+            "shaft is soft/heavily loaded. The 3×/6× bracket spans that "
+            "uncertainty.")
         add("")
         return
-    add("**Point of fixity:** derived from a **nonlinear p-y (soil–structure "
-        "interaction) analysis** of the column + Type II shaft as one continuous "
-        "beam-column on layered soil springs — the shaft head carries both the "
-        "shear and the column overturning moment (V·Hcol → Mp at yield). The "
-        "equivalent depth-to-fixity Df_eq reproduces the p-y head flexibility; an "
-        "upper/lower soil-stiffness bracket replaces the 3×/6× pair.")
+
+    add("**Point-of-fixity source: nonlinear p-y analysis** (user-selected). The "
+        "column + Type II shaft are solved as **one continuous beam-column on "
+        "layered nonlinear soil springs**; the equivalent depth-to-fixity Df_eq "
+        "is the value that reproduces the p-y pile-head flexibility in the "
+        "two-segment cantilever. An upper/lower soil-stiffness bracket (×2 / ×0.5 "
+        "on the p-y modulus) replaces the assumed 3×/6× pair. "
+        f"&nbsp;*[{_PY_REF}]*")
+    add("This is an AASHTO-sanctioned foundation-modeling method: **soil springs "
+        "based on P-y curves** are explicitly permitted for pile bents / drilled "
+        "shafts (AASHTO SGS Table 5.3.1-1, Foundation Modeling Method II) and "
+        "§C5.3.1 calls them *\"a better representation\"* than an estimated depth "
+        "to fixity, using **secant stiffness** — as done here. Caltrans SDC 2.1 "
+        "§C6.2.5.3 likewise bases the in-ground shaft moment/shear on soil springs "
+        "and notes the shaft-size iteration this analysis performs.")
     add("")
-    add("| soil bound | head stiffness k (kip/in) | head defl. y (in) | "
-        "Df_eq (in) | Df_eq/D | max in-ground M (kip-ft) | converged |")
-    add("|:--|---:|---:|---:|---:|---:|:--:|")
+
+    # --- (ii) applied pile-head forces, clearly prescribed ---
+    Fy = a.mc_col.Mp / Hcol
+    Vo = a.Mo / Hcol
+    add("**Applied pile-head forces** — a lateral point load is applied at the "
+        "**column top**; the moment at the top of shaft (= V·Hcol) then arises "
+        "from the continuous beam, so the shaft carries **both** shear and the "
+        "column overturning moment:")
+    _eq(add, "F_y  (stiffness / fixity solve)", "Mp / Hcol",
+        f"{a.mc_col.Mp:.0f}/{Hcol:.0f}",
+        f"{Fy:.0f} kip  → develops Mp = {a.mc_col.Mp/12:.0f} kip-ft at top of shaft")
+    _eq(add, "Vo  (in-ground shaft-design solve)", "Mo / Hcol",
+        f"{a.Mo:.0f}/{Hcol:.0f}",
+        f"{Vo:.0f} kip  → develops Mo = {a.Mo/12:.0f} kip-ft (overstrength) at top of shaft")
+    add("")
+
+    # --- (iii) equivalent depth-to-fixity per soil bound ---
+    add("**Equivalent depth-to-fixity** per soil-stiffness bound "
+        "(f_soil = y_head / F_y from the p-y solve; Df_eq inverts the cantilever "
+        "flexibility f = Hcol³/3EI_col + ((Hcol+Df)³ − Hcol³)/3EI_shaft):")
     for b in soil_bounds:
         s = b.soil_solution
-        conv = "yes ✅" if s.stable else "**NO ❌**"
-        add(f"| {b.soil_label} | {s.head_stiffness:.1f} | "
-            f"{s.head_deflection:.2f} | {b.fixity_depth:.0f} | "
-            f"{b.multiplier:.1f} | {s.max_inground_moment/12:.0f} | {conv} |")
+        if not s.stable:
+            _chk(add, f"Fixity — {b.soil_label}", "p-y solution physical?",
+                 "**unstable** (soil too soft / shaft too short for F_y; possible "
+                 "P-Δ instability) → increase embedment or shaft size, or improve "
+                 "the soil", status=False)
+            continue
+        _eq(add, f"Df_eq — {b.soil_label}", "invert f_soil = y_head/F_y",
+            f"y_head={s.head_deflection:.2f} in, f_soil={s.head_flexibility:.3e} in/kip, "
+            f"k_head={s.head_stiffness:.0f} kip/in",
+            f"Df_eq = {b.fixity_depth:.0f} in = {b.multiplier:.1f}·D_shaft")
     add("")
-    if any(not b.soil_solution.stable for b in soil_bounds):
-        add("> ⚠️ **A soil bound did not return a physical solution** — the soil "
-            "is too soft or the shaft too short/slender for the pile-head force "
-            "(possible P-Δ instability). Increase embedment or shaft size, or "
-            "improve the soil. The design is flagged as failing.")
-        add("")
 
-    # --- how the p-y curves were developed (per layer) ---
+    # --- (iv) how the p-y curves were developed (per layer) ---
     prof = a.soil_profile
     if prof is not None:
         D = a.shaft_D
-        add("**p-y curves — how they were developed** (per layer, at its "
-            "mid-depth; seismic ⇒ cyclic branches):")
+        add("**p-y curve development** — each depth gets its own nonlinear curve "
+            "(seismic ⇒ cyclic branches). Ultimate resistance pu and the curve "
+            "shape by model:")
+        add("- clay: **pu = min(3 + σ′v/su + 0.5·z/D, 9)·su·D**; "
+            "**p = 0.5·pu·(y/y50)^(1/3)**, y50 = 2.5·ε50·D (Matlock)  "
+            f"&nbsp;*[{_PY_REF}]*")
+        add("- sand: **pu = min[(C1·z + C2·D), C3·D]·σ′v** (C1–C3 from φ′); "
+            "**p = 0.9·pu·tanh(k·z·y/(0.9·pu))** (API, cyclic A=0.9)")
+        add("- σ′v = effective overburden (buoyant unit weight below the water "
+            "table). Solved by **secant iteration** (Es = p/y) — the full "
+            "nonlinear curve, not a bilinear simplification.")
         add("")
-        add("| layer | model | depth (ft) | γ′ (pcf) | strength | pu (kip/in) | "
-            "y50 = 2.5·ε50·D (in) |")
-        add("|---:|:--|---:|---:|:--|---:|---:|")
+        add("| layer | model | mid-depth (ft) | γ′ (pcf) | σ′v (ksi) | strength | "
+            "pu (kip/in) |")
+        add("|---:|:--|---:|---:|---:|:--|---:|")
         for i, (lyr, top) in enumerate(zip(prof.layers, prof._tops), 1):
             zc = top + 0.5 * lyr.thickness
             pu = prof.p_ult(zc, D)
+            sv = prof.sigma_v_eff(zc)
             gamma_pcf = lyr.gamma_eff / (1.0 / (1000.0 * 1728.0))
             if lyr.is_clay:
-                strength = f"su={lyr.su_at(0.5*lyr.thickness)*144:.2f} ksf"
-                y50 = f"{2.5*lyr.eps50*D:.2f}"
+                strength = (f"su={lyr.su_at(0.5*lyr.thickness)*144:.2f} ksf, "
+                            f"ε50={lyr.eps50:g}")
             elif lyr.py_model == "api_sand":
                 strength = f"φ′={lyr.phi:.0f}°, k={lyr.k_py*1000:.0f} pci"
-                y50 = "—"
             else:
                 strength = "elastic"
-                y50 = "—"
             add(f"| {i} | {lyr.py_model} | {zc/12:.1f} | {gamma_pcf:.0f} | "
-                f"{strength} | {pu:.3f} | {y50} |")
+                f"{sv:.4f} | {strength} | {pu:.3f} |")
         add("")
-        add("*Ultimate resistance pu: clay = min(3 + σ′v/su + J·z/D, 9)·su·D "
-            "(Matlock/Welch, J=0.5); sand = min[(C1·z + C2·D), C3·D]·σ′v "
-            "(Reese C-factors from φ′). Effective stress σ′v integrates the "
-            "buoyant unit weight below the water table. Curve export (p vs y at "
-            "each depth) is available for the global structural model.*")
+        add("*p vs y curves at each depth are exported (CSV) for use as springs "
+            "in the global structural model.*")
         add("")
 
-    # --- in-ground shaft design (bending & shear along depth, at overstrength) ---
+    # --- (v) in-ground shaft design (bending & shear along depth, at Vo) ---
     ig = a.inground_solution
     if ig is not None and a.inground_moment > 0:
         gamma = a.provisions.shaft_demand_factor
         m_chk = _find(a.checks, "Shaft flexure in-ground (p-y)")
         v_chk = _find(a.checks, "Shaft shear in-ground (p-y)")
-        add("**In-ground shaft design (bending & shear along the depth)** — the "
-            "column is pushed to develop its overstrength Mo at the top of shaft "
-            "(Vo = Mo/Hcol); the p-y solve then gives the moment and shear the "
-            "shaft carries **below ground**. The maximum moment is usually "
-            "**below** the interface, so an interface-only check underestimates "
-            "the shaft demand:")
-        add("")
-        add(f"- **Max in-ground moment** = {a.inground_moment/12:.0f} kip-ft at "
-            f"**{ig.max_moment_depth/12:.1f} ft below ground** — vs interface "
-            f"Mo = {a.Mo/12:.0f} kip-ft "
-            f"(ratio {a.inground_moment/a.Mo:.2f}). "
-            f"Design demand {gamma:g}·M = {gamma*a.inground_moment/12:.0f} kip-ft "
-            f"≤ Mne,shaft = {a.mc_shaft.Mp/12:.0f} kip-ft → "
-            + ("**OK** ✅" if (m_chk and m_chk.passed) else "**NG** ❌"))
-        add(f"- **Max in-ground shear** = {a.inground_shear:.0f} kip — vs "
-            f"interface Vo = {a.Mo/(a.bounds[0].Le - a.bounds[0].fixity_depth):.0f} "
-            f"kip. Demand ≤ φVn,shaft → "
-            + ("**OK** ✅" if (v_chk and v_chk.passed) else "**NG** ❌"))
-        add(f"- Overstrength pile-head deflection = {ig.head_deflection:.1f} in.")
-        add("- The moment/shear diagrams (deflection, shear, moment vs depth) and "
-            "their CSV export are shown in the app drill-down. Shaft reinforcement "
-            "may be curtailed with depth where the demand drops.")
+        phiVn = v_chk.capacity if v_chk else 0.0
+        add("**In-ground shaft design (bending & shear along the depth)** — with "
+            "Vo applied (column at overstrength Mo), the p-y solve gives the "
+            "moment & shear the shaft carries **below ground**. The peak moment "
+            "is usually **below** the interface, so an interface-only check "
+            "under-predicts the shaft demand:")
+        _eq(add, "Max in-ground M", "from p-y at Vo (overstrength)",
+            f"{a.inground_moment/12:.0f} kip-ft at {ig.max_moment_depth/12:.1f} ft "
+            f"below ground",
+            f"{a.inground_moment/a.Mo:.2f}·Mo (interface Mo = {a.Mo/12:.0f} kip-ft)")
+        _chk(add, "Shaft flexure in-ground", f"{gamma:g}·M ≤ Mne,shaft",
+             f"{gamma*a.inground_moment/12:.0f} ≤ {a.mc_shaft.Mp/12:.0f} kip-ft",
+             a.provisions.ref_shaft_capacity,
+             status=(m_chk.passed if m_chk else None))
+        _chk(add, "Shaft shear in-ground", "V ≤ φVn,shaft",
+             f"{a.inground_shear:.0f} ≤ {phiVn:.0f} kip "
+             f"(interface Vo = {Vo:.0f} kip)", a.provisions.ref_shaft_capacity,
+             status=(v_chk.passed if v_chk else None))
+        add(f"- Overstrength pile-head deflection = {ig.head_deflection:.1f} in. "
+            "Deflection/shear/moment diagrams and their CSV are in the app "
+            "drill-down; shaft reinforcement may be curtailed where demand drops.")
         add("")
 
 
