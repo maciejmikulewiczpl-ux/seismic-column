@@ -31,22 +31,21 @@ def test_optimiser_increases_shaft_longitudinal_when_flexure_short():
 
 
 def test_shaft_can_reach_high_ratio_before_giving_up():
-    """When flexure demands heavy steel, the shaft ladder escalates to #18 /
-    bundling rather than capping at a single #14 layer (~1.7%)."""
-    df = default_dataframe(1)
-    df.loc[0, "Dcol_in"] = 72
-    df.loc[0, "n_bars"] = 40
-    df.loc[0, "long_bar_no"] = 14
-    df.loc[0, "D_shaft_in"] = 78          # only 6 in oversize (AASHTO allows)
-    df.loc[0, "axial_kip"] = 2000
-    df.loc[0, "weight_kip"] = 2000
-    df.loc[0, "Hcol_ft"] = 14
-    rr = _run(df, code="AASHTO SGS 3rd Ed.")
-    sf = next(c for c in rr.assessment.checks
-              if c.name == "Shaft flexure (capacity protection)")
-    # it should now pass by pushing shaft steel well past the old ~1.7% ceiling
-    assert sf.passed
-    assert rr.shaft.section().rho_l > 0.02
+    """When flexure demands heavy steel, the shaft longitudinal ladder escalates
+    to #18 / bundling rather than capping at a single #14 layer (~1.7%)."""
+    from seismic_column.optimizer import (
+        ColumnDesign, OptimizeSpec, _size_shaft_longitudinal, _plastic_moment)
+    shaft = ColumnDesign(D=72, fc=5, cover=6, n_bars=20, long_bar_no=8,
+                         spiral_bar_no=6, spiral_spacing=4, fce_floor=5.0)
+    spec = OptimizeSpec()
+    # a very high flexural demand a single #14 layer (~1.7%) cannot meet
+    m_demand = 1.5 * _plastic_moment(
+        ColumnDesign(D=72, fc=5, cover=6, n_bars=44, long_bar_no=14,
+                     spiral_bar_no=6, spiral_spacing=4, fce_floor=5.0), 3000.0)
+    sized = _size_shaft_longitudinal(shaft, m_demand, 3000.0, spec)
+    # it escalated past the conventional single-#14 ceiling (to #18 or bundling)
+    assert sized.long_bar_no == 18 or sized.long_bundle > 1
+    assert sized.section().rho_l > 0.02
 
 
 def test_default_shaft_stays_conventional_single_layer():
@@ -59,3 +58,50 @@ def test_default_shaft_stays_conventional_single_layer():
 def test_shaft_longitudinal_respects_max_ratio():
     rr = _run(default_dataframe(1))
     assert rr.shaft.section().rho_l <= 0.04 + 1e-9
+
+
+def test_shaft_grows_with_column_to_keep_oversize():
+    """When the optimiser grows the column, the shaft is enlarged so it stays
+    >= column + min oversize (default 24 in) — no 6 in oversize results."""
+    from seismic_column.optimizer import (
+        ColumnDesign, OptimizeSpec, optimize_column, required_shaft_diameter)
+    from seismic_column.geometry import Geometry
+    from seismic_column.demand import DesignSpectrum
+    from seismic_column.provisions import get_provisions
+
+    sizes = tuple(range(36, 181, 6))
+    assert required_shaft_diameter(36, 60, 24, sizes) == 60   # user floor kept
+    assert required_shaft_diameter(54, 60, 24, sizes) == 78   # grown to col+24
+    assert required_shaft_diameter(48, 60, 24, sizes) == 72
+
+    col = ColumnDesign(D=36, fc=5, cover=2, n_bars=16, long_bar_no=9,
+                       spiral_bar_no=5, spiral_spacing=4)
+    shaft = ColumnDesign(D=60, fc=5, cover=6, n_bars=24, long_bar_no=11,
+                         spiral_bar_no=6, spiral_spacing=4)
+    res = optimize_column(
+        col, shaft, Geometry(Hcol=30 * 12, D_shaft=60),
+        DesignSpectrum(Sds=1.2, Sd1=0.7), 1200, 1200,
+        spec=OptimizeSpec(variable={"longitudinal", "confinement", "diameter", "fc"},
+                          priority=("longitudinal", "confinement", "diameter", "fc")),
+        provisions=get_provisions("AASHTO SGS 3rd Ed."))
+    # whatever column the optimiser lands on, the shaft is >= 24 in larger
+    assert res.shaft.D - res.design.D >= 24
+
+
+def test_min_oversize_respects_code_floor_under_caltrans():
+    """A user oversize below the Caltrans 24 in Type II floor is raised to 24."""
+    from seismic_column.optimizer import ColumnDesign, OptimizeSpec, optimize_column
+    from seismic_column.geometry import Geometry
+    from seismic_column.demand import DesignSpectrum
+    from seismic_column.provisions import get_provisions
+    col = ColumnDesign(D=36, fc=5, cover=2, n_bars=20, long_bar_no=10,
+                       spiral_bar_no=6, spiral_spacing=4, fce_floor=5.0)
+    shaft = ColumnDesign(D=60, fc=5, cover=6, n_bars=24, long_bar_no=11,
+                         spiral_bar_no=6, spiral_spacing=4, fce_floor=5.0)
+    res = optimize_column(
+        col, shaft, Geometry(Hcol=24 * 12, D_shaft=60),
+        DesignSpectrum(Sds=1.0, Sd1=0.6), 900, 900,
+        spec=OptimizeSpec(variable={"diameter"}, priority=("diameter",),
+                          min_shaft_oversize=6.0),          # user asks for only 6"
+        provisions=get_provisions("SDC 2.1"))
+    assert res.shaft.D - res.design.D >= 24                 # code floor wins

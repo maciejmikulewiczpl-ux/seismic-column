@@ -123,6 +123,7 @@ class GlobalConfig:
     rho_l_max: float = 0.04
     min_bar_spacing: float = 6.0        # min c/c longitudinal spacing, in
     allow_bundling: bool = False        # allow 2-bar longitudinal bundles
+    min_shaft_oversize_in: float = 24.0  # optimiser keeps shaft >= column + this
     concrete_unit_weight: float = 0.150  # kcf (kip/ft^3)
     self_weight_mass_factor: float = 1.0 / 3.0   # fraction of col self-wt in seismic mass
     self_weight_in_axial: bool = True    # add col self-wt to axial P

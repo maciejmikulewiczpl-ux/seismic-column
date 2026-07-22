@@ -78,6 +78,7 @@ _DEFAULTS = {
     "rho_l_min": 0.01, "rho_l_max": 0.04,
     "min_bar_spacing": 6.0,
     "allow_bundling": False,
+    "min_shaft_oversize_in": 24.0,
     "concrete_unit_weight": 0.150,
     "self_weight_mass_factor": 1.0 / 3.0,
     "self_weight_in_axial": True,
@@ -130,6 +131,7 @@ def _build_config() -> GlobalConfig:
         shaft_moment_basis=s("shaft_basis"), mu_d_limit=s("mu_d_limit"),
         rho_l_min=s("rho_l_min"), rho_l_max=s("rho_l_max"),
         min_bar_spacing=s("min_bar_spacing"), allow_bundling=s("allow_bundling"),
+        min_shaft_oversize_in=s("min_shaft_oversize_in"),
         concrete_unit_weight=s("concrete_unit_weight"),
         self_weight_mass_factor=s("self_weight_mass_factor"),
         self_weight_in_axial=s("self_weight_in_axial"),
@@ -171,6 +173,7 @@ def _load_project_into_state(df: pd.DataFrame, cfg: GlobalConfig) -> None:
     s["rho_l_min"], s["rho_l_max"] = cfg.rho_l_min, cfg.rho_l_max
     s["min_bar_spacing"] = cfg.min_bar_spacing
     s["allow_bundling"] = cfg.allow_bundling
+    s["min_shaft_oversize_in"] = getattr(cfg, "min_shaft_oversize_in", 24.0)
     s["concrete_unit_weight"] = cfg.concrete_unit_weight
     s["self_weight_mass_factor"] = cfg.self_weight_mass_factor
     s["self_weight_in_axial"] = cfg.self_weight_in_axial
@@ -388,6 +391,13 @@ with st.sidebar:
                 help="Permit 2-bar bundles when the perimeter is full. "
                      "Longitudinal bars go up to #14; spirals up to #8, "
                      "with bundled #4 @ 4\" as the max confinement (Caltrans).")
+    st.number_input("Min shaft oversize (in)", 0.0, 96.0,
+                    key="min_shaft_oversize_in", step=6.0,
+                    help="When optimising grows the column, the shaft is enlarged "
+                         "to the next standard size so it stays at least this many "
+                         "inches larger than the column (Type II oversize). Your "
+                         "entered shaft is the floor. Default 24 in (2 ft); the "
+                         "code minimum (24 in for Caltrans) is always enforced.")
 
     st.subheader("Checks")
     st.selectbox("Shaft moment demand basis", ["interface", "fixity"], key="shaft_basis")

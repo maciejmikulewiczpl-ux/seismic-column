@@ -92,6 +92,7 @@ def run_row(row: pd.Series, cfg: GlobalConfig, on_candidate=None) -> RowResult:
             variable=set(cfg.variable), priority=tuple(cfg.priority),
             rho_l_min=rho_l_min, rho_l_max=rho_l_max,
             min_bar_spacing=cfg.min_bar_spacing, allow_bundling=cfg.allow_bundling,
+            min_shaft_oversize=cfg.min_shaft_oversize_in,
         )
         res: OptimizeResult = optimize_column(
             column, shaft, geometry, spectrum, axial, weight, spec=spec,
@@ -160,6 +161,7 @@ _COL_DESIGN_MAP = {
     "spiral_bundle": "spiral_bundle",
 }
 _SHAFT_DESIGN_MAP = {
+    "D_shaft_in": "D",
     "shaft_fc_ksi": "fc", "shaft_cover_in": "cover", "shaft_n_bars": "n_bars",
     "shaft_long_bar_no": "long_bar_no", "shaft_long_bundle": "long_bundle",
     "shaft_spiral_bar_no": "spiral_bar_no",

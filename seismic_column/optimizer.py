@@ -102,6 +102,11 @@ class OptimizeSpec:
     fc_values: tuple[float, ...] = (4.0, 5.0, 6.0)
     rho_l_min: float = 0.01
     rho_l_max: float = 0.04
+    # oversized (Type II) shaft: grow the shaft so it stays this many inches
+    # larger than the column; the entered shaft is the floor.  Standard shaft
+    # sizes the growth snaps up to.
+    min_shaft_oversize: float = 24.0
+    shaft_diameters: tuple[float, ...] = tuple(range(36, 181, 6))
 
 
 @dataclass
@@ -193,6 +198,25 @@ def _confinement_ladder(spec: OptimizeSpec) -> list[tuple[int, float, int]]:
 
 def _ascending_from(values: tuple[float, ...], current: float) -> list[float]:
     return [v for v in sorted(values) if v >= current]
+
+
+def required_shaft_diameter(col_D: float, base_shaft_D: float, oversize: float,
+                            shaft_sizes: tuple[float, ...]) -> float:
+    """Shaft diameter keeping the Type II oversize as the column grows.
+
+    The entered shaft ``base_shaft_D`` is the floor; when the column would
+    encroach on the oversize (``col_D + oversize > base_shaft_D``) the shaft is
+    grown to the next standard size >= ``col_D + oversize``.  So the shaft is
+    always at least ``oversize`` inches larger than the column, and the user's
+    entered size is never reduced.
+    """
+    required = col_D + oversize
+    if required <= base_shaft_D:
+        return base_shaft_D
+    for s in sorted(shaft_sizes):
+        if s >= required:
+            return s
+    return required
 
 
 # ---------------------------------------------------------------------------
@@ -392,15 +416,27 @@ def optimize_column(
     design = replace(start)
     log: list[str] = []
     state = {"iters": 0, "shaft": replace(shaft_start)}
+    # keep the shaft at least this many inches larger than the column (Type II
+    # oversize); the code minimum is a hard floor, the user's value can be more.
+    base_shaft_D = shaft_start.D
+    min_oversize = max(spec.min_shaft_oversize, provisions.min_shaft_oversize)
 
     def assess(d: ColumnDesign) -> ColumnAssessment:
-        shaft = size_shaft(d, shaft_start, ctx)
+        # grow the shaft to preserve the oversize as the column grows
+        shaft_D = required_shaft_diameter(d.D, base_shaft_D, min_oversize,
+                                          spec.shaft_diameters)
+        geom_d = (geometry if shaft_D == geometry.D_shaft
+                  else replace(geometry, D_shaft=shaft_D))
+        ctx_d = ctx if geom_d is geometry else replace(ctx, geometry=geom_d)
+        seed = (shaft_start if shaft_D == shaft_start.D
+                else replace(shaft_start, D=shaft_D))
+        shaft = size_shaft(d, seed, ctx_d)
         state["shaft"] = shaft
         state["iters"] += 1
         if on_candidate is not None:
             on_candidate(state["iters"])
         return evaluate_column(
-            d.section(), shaft.section(), geometry, spectrum, axial, weight,
+            d.section(), shaft.section(), geom_d, spectrum, axial, weight,
             fixity_multipliers=fixity_multipliers,
             rho_l_min=spec.rho_l_min, rho_l_max=spec.rho_l_max,
             shaft_moment_basis=shaft_moment_basis,
@@ -466,23 +502,18 @@ def _sweep_parameter(param, design, spec, assess, log, state, max_iterations, ct
         return design, assess(design)
 
     if param == "diameter":
+        # The shaft is grown with the column (assess -> required_shaft_diameter)
+        # so the Type II oversize — and with it SGS 8.9 / 8.8.12 and the Caltrans
+        # 24 in of SDC 2.1 §6.2.5.1 — is preserved without capping the column.
         for D in _ascending_from(spec.diameters, design.D):
             if state["iters"] >= max_iterations:
-                break
-            # The shaft must stay oversized or the Type II premise — and with it
-            # SGS 8.9 / 8.8.12 — no longer holds.  Caltrans additionally
-            # requires at least 24 in of oversize (SDC 2.1 §6.2.5.1).
-            D_max = ctx.geometry.D_shaft - ctx.provisions.min_shaft_oversize
-            if D >= D_max:
-                log.append(f"diameter capped at {design.D:g} in (shaft "
-                           f"{ctx.geometry.D_shaft:g} in, min oversize "
-                           f"{ctx.provisions.min_shaft_oversize:g} in)")
                 break
             cand = replace(design, D=D)
             a = assess(cand)
             design = cand
             if a.passed:
-                log.append(f"diameter -> {D} in")
+                log.append(f"diameter -> {D} in (shaft "
+                           f"{a.shaft_D:g} in)")
                 return design, a
         log.append("diameter maxed")
         return design, assess(design)
