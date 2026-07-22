@@ -126,6 +126,103 @@ class GlobalConfig:
     concrete_unit_weight: float = 0.150  # kcf (kip/ft^3)
     self_weight_mass_factor: float = 1.0 / 3.0   # fraction of col self-wt in seismic mass
     self_weight_in_axial: bool = True    # add col self-wt to axial P
+    # --- soil-structure interaction (point of fixity) ---
+    fixity_source: str = "multiplier"    # "multiplier" (3x/6x) | "soil" (p-y)
+    water_table_ft: float = 100.0        # depth to groundwater below top of shaft
+    shaft_embed_ft: float = 60.0         # embedded shaft length (ft)
+    soil_stiff_factor: float = 2.0       # upper-bound soil-stiffness bracket
+    soil_soft_factor: float = 0.5        # lower-bound soil-stiffness bracket
+    soil_layers: tuple[dict, ...] = field(default_factory=tuple)  # strata (eng. units)
+
+
+# Strata table columns (engineering units, matching LPile input).
+SOIL_COLUMNS: tuple[str, ...] = (
+    "layer", "py_model", "thickness_ft", "gamma_pcf",
+    "su_top_ksf", "su_bot_ksf", "eps50", "phi_deg", "k_pci",
+)
+
+SOIL_COLUMN_META: dict[str, tuple[str, str]] = {
+    "layer": ("Layer", "Layer name / number (top to bottom)."),
+    "py_model": ("p-y model", "matlock_soft_clay | welch_stiff_clay | api_sand | "
+                 "elastic_subgrade"),
+    "thickness_ft": ("Thickness (ft)", "Layer thickness."),
+    "gamma_pcf": ("Unit wt γ (pcf)", "Total unit weight; buoyant below the water "
+                  "table is applied automatically."),
+    "su_top_ksf": ("su top (ksf)", "Undrained shear strength at layer top (clay)."),
+    "su_bot_ksf": ("su bot (ksf)", "Undrained shear strength at layer bottom (clay)."),
+    "eps50": ("ε50", "Strain at 50% strength (clay)."),
+    "phi_deg": ("φ′ (deg)", "Effective friction angle (sand)."),
+    "k_pci": ("k (pci)", "Initial subgrade modulus (sand / stiff clay)."),
+}
+
+
+def default_soil_layers() -> list[dict]:
+    """A starter strata table (LPile-style, engineering units)."""
+    return [
+        {"layer": "1 clay", "py_model": "matlock_soft_clay", "thickness_ft": 20.0,
+         "gamma_pcf": 120.0, "su_top_ksf": 1.0, "su_bot_ksf": 1.5, "eps50": 0.01,
+         "phi_deg": 0.0, "k_pci": 0.0},
+        {"layer": "2 sand", "py_model": "api_sand", "thickness_ft": 40.0,
+         "gamma_pcf": 125.0, "su_top_ksf": 0.0, "su_bot_ksf": 0.0, "eps50": 0.0,
+         "phi_deg": 36.0, "k_pci": 90.0},
+    ]
+
+
+def build_soil_profile(cfg: "GlobalConfig"):
+    """Build a :class:`~seismic_column.soil.SoilProfile` from the config, or None.
+
+    Layers are marked submerged (buoyant unit weight) when their top is at or
+    below ``water_table_ft``.  Returns ``None`` when no strata are defined.
+    """
+    from .soil import SoilLayer, SoilProfile
+    if not cfg.soil_layers:
+        return None
+    layers, top_ft = [], 0.0
+    for d in cfg.soil_layers:
+        th = float(d.get("thickness_ft", 0.0))
+        if th <= 0.0:
+            continue
+        submerged = top_ft >= float(cfg.water_table_ft)
+        layers.append(SoilLayer.from_engineering(
+            th, str(d.get("py_model", "matlock_soft_clay")),
+            float(d.get("gamma_pcf", 120.0)),
+            su_top_ksf=float(d.get("su_top_ksf", 0.0)),
+            su_bot_ksf=float(d.get("su_bot_ksf", 0.0)) or None,
+            eps50=float(d.get("eps50", 0.01)) or 0.01,
+            phi_deg=float(d.get("phi_deg", 0.0)),
+            k_pci=float(d.get("k_pci", 0.0)),
+            submerged=submerged,
+        ))
+        top_ft += th
+    return SoilProfile(tuple(layers)) if layers else None
+
+
+def pile_profile_table(sol) -> pd.DataFrame:
+    """Deflection / shear / moment along the pile, for diagrams and CSV export."""
+    import numpy as np
+    x = sol.x
+    zg = x[sol.ground_index]
+    return pd.DataFrame({
+        "dist_from_top_ft": np.round(x / 12.0, 3),
+        "depth_below_ground_ft": np.round((x - zg) / 12.0, 3),
+        "deflection_in": np.round(sol.y, 5),
+        "shear_kip": np.round(sol.shear, 2),
+        "moment_kipft": np.round(sol.moment / 12.0, 1),
+    })
+
+
+def py_curves_table(profile, D: float, depths, y_max: float | None = None,
+                    n: int = 41) -> pd.DataFrame:
+    """Long-format p-y curves at ``depths`` (in) — spring definitions for a
+    global structural model. Columns: depth_ft, y_in, p_kip_per_in."""
+    rows = []
+    for z in depths:
+        ys, ps = profile.py_curve(z, D, y_max, n)
+        for y, p in zip(ys, ps):
+            rows.append({"depth_ft": round(z / 12.0, 2),
+                         "y_in": round(float(y), 5),
+                         "p_kip_per_in": round(float(p), 5)})
+    return pd.DataFrame(rows)
 
 
 def default_row(name: str = "C1") -> dict:
@@ -254,6 +351,7 @@ def config_to_dict(cfg: GlobalConfig) -> dict:
             spec["accels"] = list(spec.get("accels", []))
     d["priority"] = list(d["priority"])
     d["variable"] = list(d["variable"])
+    d["soil_layers"] = [dict(l) for l in d.get("soil_layers", ())]
     return d
 
 
@@ -274,6 +372,7 @@ def config_from_dict(d: dict) -> GlobalConfig:
     ) if ls else None
     d["priority"] = tuple(d.get("priority", ()))
     d["variable"] = tuple(d.get("variable", ()))
+    d["soil_layers"] = tuple(dict(l) for l in d.get("soil_layers", ()))
     valid = {f for f in GlobalConfig.__dataclass_fields__}
     return GlobalConfig(**{k: v for k, v in d.items() if k in valid})
 

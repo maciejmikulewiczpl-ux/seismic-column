@@ -42,6 +42,104 @@ def _find(checks, name):
     return next((c for c in checks if c.name == name), None)
 
 
+def _add_fixity_source(add, a) -> None:
+    """Explain how the point of fixity was obtained (manual multiplier or p-y)."""
+    soil_bounds = [b for b in a.bounds if b.soil_solution is not None]
+    if not soil_bounds:
+        add("**Point of fixity:** assumed **manual multipliers** "
+            f"Df = mult × D_shaft = "
+            f"{', '.join(f'{b.multiplier:g}×' for b in a.bounds)} "
+            "(3× upper-bound / 6× lower-bound stiffness, no soil model).")
+        add("")
+        return
+    add("**Point of fixity:** derived from a **nonlinear p-y (soil–structure "
+        "interaction) analysis** of the column + Type II shaft as one continuous "
+        "beam-column on layered soil springs — the shaft head carries both the "
+        "shear and the column overturning moment (V·Hcol → Mp at yield). The "
+        "equivalent depth-to-fixity Df_eq reproduces the p-y head flexibility; an "
+        "upper/lower soil-stiffness bracket replaces the 3×/6× pair.")
+    add("")
+    add("| soil bound | head stiffness k (kip/in) | head defl. y (in) | "
+        "Df_eq (in) | Df_eq/D | max in-ground M (kip-ft) | converged |")
+    add("|:--|---:|---:|---:|---:|---:|:--:|")
+    for b in soil_bounds:
+        s = b.soil_solution
+        conv = "yes ✅" if s.stable else "**NO ❌**"
+        add(f"| {b.soil_label} | {s.head_stiffness:.1f} | "
+            f"{s.head_deflection:.2f} | {b.fixity_depth:.0f} | "
+            f"{b.multiplier:.1f} | {s.max_inground_moment/12:.0f} | {conv} |")
+    add("")
+    if any(not b.soil_solution.stable for b in soil_bounds):
+        add("> ⚠️ **A soil bound did not return a physical solution** — the soil "
+            "is too soft or the shaft too short/slender for the pile-head force "
+            "(possible P-Δ instability). Increase embedment or shaft size, or "
+            "improve the soil. The design is flagged as failing.")
+        add("")
+
+    # --- how the p-y curves were developed (per layer) ---
+    prof = a.soil_profile
+    if prof is not None:
+        D = a.shaft_D
+        add("**p-y curves — how they were developed** (per layer, at its "
+            "mid-depth; seismic ⇒ cyclic branches):")
+        add("")
+        add("| layer | model | depth (ft) | γ′ (pcf) | strength | pu (kip/in) | "
+            "y50 = 2.5·ε50·D (in) |")
+        add("|---:|:--|---:|---:|:--|---:|---:|")
+        for i, (lyr, top) in enumerate(zip(prof.layers, prof._tops), 1):
+            zc = top + 0.5 * lyr.thickness
+            pu = prof.p_ult(zc, D)
+            gamma_pcf = lyr.gamma_eff / (1.0 / (1000.0 * 1728.0))
+            if lyr.is_clay:
+                strength = f"su={lyr.su_at(0.5*lyr.thickness)*144:.2f} ksf"
+                y50 = f"{2.5*lyr.eps50*D:.2f}"
+            elif lyr.py_model == "api_sand":
+                strength = f"φ′={lyr.phi:.0f}°, k={lyr.k_py*1000:.0f} pci"
+                y50 = "—"
+            else:
+                strength = "elastic"
+                y50 = "—"
+            add(f"| {i} | {lyr.py_model} | {zc/12:.1f} | {gamma_pcf:.0f} | "
+                f"{strength} | {pu:.3f} | {y50} |")
+        add("")
+        add("*Ultimate resistance pu: clay = min(3 + σ′v/su + J·z/D, 9)·su·D "
+            "(Matlock/Welch, J=0.5); sand = min[(C1·z + C2·D), C3·D]·σ′v "
+            "(Reese C-factors from φ′). Effective stress σ′v integrates the "
+            "buoyant unit weight below the water table. Curve export (p vs y at "
+            "each depth) is available for the global structural model.*")
+        add("")
+
+    # --- in-ground shaft design (bending & shear along depth, at overstrength) ---
+    ig = a.inground_solution
+    if ig is not None and a.inground_moment > 0:
+        gamma = a.provisions.shaft_demand_factor
+        m_chk = _find(a.checks, "Shaft flexure in-ground (p-y)")
+        v_chk = _find(a.checks, "Shaft shear in-ground (p-y)")
+        add("**In-ground shaft design (bending & shear along the depth)** — the "
+            "column is pushed to develop its overstrength Mo at the top of shaft "
+            "(Vo = Mo/Hcol); the p-y solve then gives the moment and shear the "
+            "shaft carries **below ground**. The maximum moment is usually "
+            "**below** the interface, so an interface-only check underestimates "
+            "the shaft demand:")
+        add("")
+        add(f"- **Max in-ground moment** = {a.inground_moment/12:.0f} kip-ft at "
+            f"**{ig.max_moment_depth/12:.1f} ft below ground** — vs interface "
+            f"Mo = {a.Mo/12:.0f} kip-ft "
+            f"(ratio {a.inground_moment/a.Mo:.2f}). "
+            f"Design demand {gamma:g}·M = {gamma*a.inground_moment/12:.0f} kip-ft "
+            f"≤ Mne,shaft = {a.mc_shaft.Mp/12:.0f} kip-ft → "
+            + ("**OK** ✅" if (m_chk and m_chk.passed) else "**NG** ❌"))
+        add(f"- **Max in-ground shear** = {a.inground_shear:.0f} kip — vs "
+            f"interface Vo = {a.Mo/(a.bounds[0].Le - a.bounds[0].fixity_depth):.0f} "
+            f"kip. Demand ≤ φVn,shaft → "
+            + ("**OK** ✅" if (v_chk and v_chk.passed) else "**NG** ❌"))
+        add(f"- Overstrength pile-head deflection = {ig.head_deflection:.1f} in.")
+        add("- The moment/shear diagrams (deflection, shear, moment vs depth) and "
+            "their CSV export are shown in the app drill-down. Shaft reinforcement "
+            "may be curtailed with depth where the demand drops.")
+        add("")
+
+
 def _add_rd_derivation(add, a) -> None:
     """Explain the SGS 4.3.3 short-period magnification when it is applied.
 
@@ -341,6 +439,7 @@ def _detailed_calcs(rr: RowResult) -> list[str]:
         "cantilever fixed at the point of fixity (Df below top of shaft); elastic "
         "flexibility by the unit-load method, M(x) = F·x.*")
     add("")
+    _add_fixity_source(add, a)
     add(f"- Column-segment cracked rigidity:  EI_col = Mp/φy = {a.EI_col:.3e} kip-in²")
     add(f"- Shaft-segment cracked rigidity:  EI_shaft = {a.EI_shaft:.3e} kip-in²")
     add(f"- Column height (top of shaft to load point):  L = Le − Df = {L:.0f} in")

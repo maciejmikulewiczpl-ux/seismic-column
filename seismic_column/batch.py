@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import pandas as pd
 
 from .geometry import Geometry
-from .io_schema import GlobalConfig, validate
+from .io_schema import GlobalConfig, build_soil_profile, validate
 from .optimizer import ColumnDesign, OptimizeResult, OptimizeSpec, optimize_column
 from .provisions import get_provisions
 from .sdc_capacity import ColumnAssessment, evaluate_column
@@ -75,6 +75,14 @@ def run_row(row: pd.Series, cfg: GlobalConfig) -> RowResult:
     weight = float(row["weight_kip"])
     name = str(row["name"])
 
+    # soil-structure interaction (point of fixity from p-y strata)
+    soil_profile = build_soil_profile(cfg) if cfg.fixity_source == "soil" else None
+    soil_kw = dict(
+        fixity_source=cfg.fixity_source, soil_profile=soil_profile,
+        shaft_embed_length=cfg.shaft_embed_ft * 12.0,
+        soil_bounds=(cfg.soil_stiff_factor, cfg.soil_soft_factor),
+    )
+
     if cfg.optimize:
         spec = OptimizeSpec(
             variable=set(cfg.variable), priority=tuple(cfg.priority),
@@ -88,7 +96,7 @@ def run_row(row: pd.Series, cfg: GlobalConfig) -> RowResult:
             concrete_unit_weight=cfg.concrete_unit_weight,
             self_weight_mass_factor=cfg.self_weight_mass_factor,
             self_weight_in_axial=cfg.self_weight_in_axial,
-            provisions=provisions,
+            provisions=provisions, **soil_kw,
         )
         return RowResult(name, res.design, res.shaft, res.assessment, res.feasible,
                         True, res.log)
@@ -102,7 +110,7 @@ def run_row(row: pd.Series, cfg: GlobalConfig) -> RowResult:
         concrete_unit_weight=cfg.concrete_unit_weight,
         self_weight_mass_factor=cfg.self_weight_mass_factor,
         self_weight_in_axial=cfg.self_weight_in_axial,
-        provisions=provisions,
+        provisions=provisions, **soil_kw,
     )
     return RowResult(name, column, shaft, assessment, assessment.passed, False, [])
 

@@ -130,6 +130,10 @@ class _Ctx:
     self_weight_mass_factor: float = 1.0 / 3.0
     self_weight_in_axial: bool = True
     provisions: CodeProvisions = SDC_2_0
+    fixity_source: str = "multiplier"
+    soil_profile: object = None
+    shaft_embed_length: float | None = None
+    soil_bounds: tuple[float, float] = (2.0, 0.5)
 
     def effective_axial(self, D: float) -> float:
         """Axial incl. column self-weight above the hinge for a given diameter."""
@@ -296,6 +300,10 @@ def optimize_column(
     self_weight_mass_factor: float = 1.0 / 3.0,
     self_weight_in_axial: bool = True,
     provisions: CodeProvisions = SDC_2_0,
+    fixity_source: str = "multiplier",
+    soil_profile: object = None,
+    shaft_embed_length: float | None = None,
+    soil_bounds: tuple[float, float] = (2.0, 0.5),
     max_iterations: int = 400,
 ) -> OptimizeResult:
     """Greedy priority-ordered search for a feasible column + shaft design."""
@@ -303,7 +311,8 @@ def optimize_column(
     ctx = _Ctx(geometry, spectrum, axial, weight, fixity_multipliers,
                shaft_moment_basis, lle_spectrum, lle_mu_limit, spec,
                concrete_unit_weight, self_weight_mass_factor, self_weight_in_axial,
-               provisions)
+               provisions, fixity_source, soil_profile, shaft_embed_length,
+               soil_bounds)
     design = replace(start)
     log: list[str] = []
     state = {"iters": 0, "shaft": replace(shaft_start)}
@@ -322,6 +331,8 @@ def optimize_column(
             self_weight_mass_factor=self_weight_mass_factor,
             self_weight_in_axial=self_weight_in_axial,
             provisions=provisions,
+            fixity_source=fixity_source, soil_profile=soil_profile,
+            shaft_embed_length=shaft_embed_length, soil_bounds=soil_bounds,
         )
 
     assessment = assess(design)

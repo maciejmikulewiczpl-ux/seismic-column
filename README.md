@@ -40,6 +40,15 @@ code; see [seismic_column/provisions.py](seismic_column/provisions.py).
   diameter → f'c) with user-selectable fixed/variable parameters.
 - **Batch tabular** workflow (editable table + CSV/Excel import/export), results
   grid, per-column drill-down with M-φ and spectrum plots, and Markdown reports.
+- **Point of fixity — assumed *or* soil-derived.** Either the classic Df = 3×/6×
+  shaft-diameter multipliers, or an in-house **nonlinear p-y (LPile-equivalent)**
+  analysis: the column + Type II shaft are solved as one continuous beam-column
+  on layered soil springs (Matlock soft clay, Reese/Welch stiff clay, API/Reese
+  sand — cyclic), giving a mechanics-based equivalent depth-to-fixity. Strata are
+  entered LPile-style (su, φ′, ε50, k, γ per layer), so a geotech's LPile soil
+  table maps in 1:1. Validated against the beam-on-elastic-foundation closed form
+  (<0.1 %). A soil too soft / shaft too short for the demand is flagged unstable,
+  never credited with a stiff base.
 - **Project files** (`.json`) store every column *and* all settings in one file.
   After an optimiser run the optimised column/shaft designs (including bundles)
   are written back into the table, and an in-place **Save** button persists that
@@ -116,6 +125,8 @@ seismic_column/
   moment_curvature.py  fibre M-φ solver + Caltrans bilinear idealisation
   geometry.py          Type II two-segment equivalent cantilever
   demand.py            design spectrum + ESA displacement demand
+  soil.py              strata + p-y curves (Matlock/Reese/API) + Davisson
+  pile_solver.py       FE beam-column on nonlinear Winkler springs (p-y)
   sdc_capacity.py      Lp, Δ-capacity, all SDC checks, shaft capacity protection
   optimizer.py         greedy priority-ordered design search
   io_schema.py         batch table schema + CSV/Excel I/O + validation

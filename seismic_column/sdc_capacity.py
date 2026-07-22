@@ -17,7 +17,7 @@ Unless stated otherwise, forces are kip, lengths in, stresses ksi.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from .demand import (
     DemandResult,
@@ -28,8 +28,10 @@ from .demand import (
 from .geometry import Geometry
 from .materials import bar_diameter
 from .moment_curvature import MomentCurvature, moment_curvature
+from .pile_solver import PileSolution, solve_lateral
 from .provisions import SDC_2_0, CodeProvisions
 from .section import CircularSection
+from .soil import SoilProfile
 
 OVERSTRENGTH_FACTOR = 1.2   # SDC A706 overstrength magnification, Mo = 1.2 Mp
 PHI_SHEAR = 0.90            # shear resistance factor
@@ -376,6 +378,9 @@ class BoundResult:
     shaft_moment_fixity: float      # Mo amplified to point of fixity (informational)
     lle_demand: DemandResult | None = None   # low-level earthquake demand
     mu_lle: float | None = None              # LLE displacement ductility (elastic if <=1)
+    # soil-structure interaction (only when fixity_source == "soil")
+    soil_solution: PileSolution | None = None   # the p-y pile solve for this bound
+    soil_label: str = ""                         # e.g. "upper (x2)" / "lower (x0.5)"
 
 
 @dataclass
@@ -399,10 +404,36 @@ class ColumnAssessment:
     axial_entered: float = 0.0
     weight_entered: float = 0.0
     provisions: CodeProvisions = SDC_2_0
+    soil_profile: SoilProfile | None = None   # strata used (fixity_source="soil")
+    shaft_D: float = 0.0                       # shaft diameter, in (for p-y report)
+    shaft_embed_length: float = 0.0            # embedded length, in
+    inground_solution: PileSolution | None = None   # overstrength p-y (shaft design)
+    inground_moment: float = 0.0               # max |M| below ground at Mo, kip-in
+    inground_shear: float = 0.0                # max |V| below ground at Mo, kip
 
     @property
     def passed(self) -> bool:
         return all(c.passed for c in self.checks)
+
+
+# ---------------------------------------------------------------------------
+# Cached p-y pile solve (the optimiser re-evaluates many candidates)
+# ---------------------------------------------------------------------------
+_PILE_CACHE: dict[tuple, PileSolution] = {}
+
+
+def _cached_pile_solve(Hcol, L_embed, EI_col, EI_shaft, D_shaft, axial,
+                       soil: SoilProfile, V_head) -> PileSolution:
+    key = (round(Hcol, 3), round(L_embed, 3), round(EI_col, 0), round(EI_shaft, 0),
+           round(D_shaft, 3), round(axial, 3), round(V_head, 3), soil.signature())
+    sol = _PILE_CACHE.get(key)
+    if sol is None:
+        sol = solve_lateral(Hcol, L_embed, EI_col, EI_shaft, D_shaft, axial,
+                            soil, V_head)
+        if len(_PILE_CACHE) > 4000:
+            _PILE_CACHE.clear()
+        _PILE_CACHE[key] = sol
+    return sol
 
 
 def evaluate_column(
@@ -424,6 +455,10 @@ def evaluate_column(
     self_weight_mass_factor: float = 1.0 / 3.0,
     self_weight_in_axial: bool = True,
     provisions: CodeProvisions = SDC_2_0,
+    fixity_source: str = "multiplier",
+    soil_profile: SoilProfile | None = None,
+    shaft_embed_length: float | None = None,
+    soil_bounds: tuple[float, float] = (2.0, 0.5),
 ) -> ColumnAssessment:
     """Full SDC 2.1 ESA assessment of a column on a Type II shaft.
 
@@ -471,14 +506,33 @@ def evaluate_column(
     dbl = bar_diameter(column.long_bar_no)
     Lp = plastic_hinge_length(geometry.Hcol, column.fye, dbl)
     Mo = provisions.overstrength_factor * mc_col.Mp
+    F_y = mc_col.Mp / geometry.Hcol            # yield head force (soil solve level)
+
+    # --- build the fixity bounds: from manual multipliers, or soil-derived ---
+    if fixity_source == "soil":
+        if soil_profile is None:
+            raise ValueError("fixity_source='soil' requires a soil_profile")
+        L_embed = shaft_embed_length or soil_profile.depth
+        _lbl = {2.0: "upper (stiff soil)", 0.5: "lower (soft soil)", 1.0: "best"}
+        bound_specs = []
+        for factor in soil_bounds:
+            prof = replace(soil_profile,
+                           stiffness_factor=soil_profile.stiffness_factor * factor)
+            sol = _cached_pile_solve(geometry.Hcol, L_embed, EI_col, EI_shaft,
+                                     geometry.D_shaft, P_used, prof, F_y)
+            mult = sol.Df_eq / geometry.D_shaft
+            bound_specs.append((mult, sol, _lbl.get(factor, f"×{factor:g}")))
+    elif fixity_source == "multiplier":
+        bound_specs = [(m, None, "") for m in fixity_multipliers]
+    else:
+        raise ValueError("fixity_source must be 'multiplier' or 'soil'")
 
     bounds: list[BoundResult] = []
-    for mult in fixity_multipliers:
+    for mult, soil_sol, soil_lbl in bound_specs:
         k = geometry.lateral_stiffness(EI_col, EI_shaft, mult)
         demand = displacement_demand(spectrum, k, weight_mass)
 
         # displacement capacity: hinge at top of shaft, arm = Hcol
-        F_y = mc_col.Mp / geometry.Hcol
         delta_y = F_y * geometry.tip_flexibility(EI_col, EI_shaft, mult)
         theta_p = Lp * (mc_col.phi_u - mc_col.phi_y)
         delta_p = theta_p * (geometry.Hcol - Lp / 2.0)
@@ -508,15 +562,38 @@ def evaluate_column(
             delta_c=delta_c, mu_capacity=mu_capacity, mu_demand=mu_demand,
             shaft_moment_interface=Mo, shaft_moment_fixity=shaft_moment_fixity,
             lle_demand=lle_demand, mu_lle=mu_lle,
+            soil_solution=soil_sol, soil_label=soil_lbl,
         ))
 
     # governing bound = largest displacement-demand/capacity ratio
     governing = max(bounds, key=lambda b: b.demand.disp_demand / b.delta_c)
 
+    # --- in-ground shaft demand at column OVERSTRENGTH (soil mode) ---
+    # Apply Vo = Mo/Hcol so the column develops Mo at the top of shaft; the p-y
+    # solve then gives the moment & shear the shaft must resist ALONG ITS DEPTH
+    # (capacity protection). Envelope over the soil-stiffness bounds.
+    inground = None                 # governing overstrength PileSolution
+    inground_M = 0.0                # max |M| below ground at Mo, kip-in
+    inground_V = 0.0               # max |V| below ground at Mo, kip
+    if fixity_source == "soil" and soil_profile is not None:
+        Vo = Mo / geometry.Hcol
+        L_embed = shaft_embed_length or soil_profile.depth
+        for factor in soil_bounds:
+            prof = replace(soil_profile,
+                           stiffness_factor=soil_profile.stiffness_factor * factor)
+            s = _cached_pile_solve(geometry.Hcol, L_embed, EI_col, EI_shaft,
+                                   geometry.D_shaft, P_used, prof, Vo)
+            if not s.stable:
+                continue
+            if s.max_inground_moment >= inground_M:
+                inground_M, inground = s.max_inground_moment, s
+            inground_V = max(inground_V, s.max_inground_shear)
+
     checks = _build_checks(
         column, shaft, geometry, mc_col, mc_shaft, Lp, Mo, P_used, shaft_axial,
         bounds, governing, mu_d_limit, rho_l_min, rho_l_max, shaft_moment_basis,
         lle_spectrum is not None, lle_mu_limit, provisions,
+        inground_M, inground_V,
     )
 
     return ColumnAssessment(
@@ -525,6 +602,12 @@ def evaluate_column(
         Mo=Mo, bounds=bounds, checks=checks, governing_bound=governing,
         W_self=W_self, P_used=P_used, weight_mass=weight_mass,
         axial_entered=axial, weight_entered=weight, provisions=provisions,
+        soil_profile=(soil_profile if fixity_source == "soil" else None),
+        shaft_D=geometry.D_shaft,
+        shaft_embed_length=(shaft_embed_length or
+                            (soil_profile.depth if soil_profile else 0.0)),
+        inground_solution=inground, inground_moment=inground_M,
+        inground_shear=inground_V,
     )
 
 
@@ -532,6 +615,7 @@ def _build_checks(
     column, shaft, geometry, mc_col, mc_shaft, Lp, Mo, axial, shaft_axial,
     bounds, governing, mu_d_limit, rho_l_min, rho_l_max, shaft_moment_basis,
     has_lle=False, lle_mu_limit=1.0, provisions=SDC_2_0,
+    inground_M=0.0, inground_V=0.0,
 ) -> list[Check]:
     checks: list[Check] = []
 
@@ -632,6 +716,26 @@ def _build_checks(
         f"Vo={Vo:.1f} kip, phiVn_shaft={phiVn_s:.1f} kip",
     ))
 
+    # 9c. In-ground shaft design from the p-y overstrength solve (soil mode):
+    # the shaft must resist the actual moment & shear developed BELOW GROUND
+    # when the column hinges at overstrength (Mo). This designs the shaft along
+    # its depth rather than only at the interface.
+    if inground_M > 0.0:
+        gamma = provisions.shaft_demand_factor
+        m_dem = gamma * inground_M
+        checks.append(Check(
+            "Shaft flexure in-ground (p-y)", m_dem, mc_shaft.Mp,
+            mc_shaft.Mp >= m_dem,
+            f"{gamma:g}·M_in-ground={m_dem/12:.0f} kip-ft (from p-y at Mo), "
+            f"Mne_shaft={mc_shaft.Mp/12:.0f} kip-ft",
+        ))
+        checks.append(Check(
+            "Shaft shear in-ground (p-y)", inground_V, phiVn_s,
+            phiVn_s >= inground_V,
+            f"V_in-ground={inground_V:.1f} kip (from p-y at Mo), "
+            f"phiVn_shaft={phiVn_s:.1f} kip",
+        ))
+
     # 9b. Oversized-shaft lateral confinement (SGS 8.8.12): the shaft's
     # volumetric ratio must reach 50% of the confinement at the column base.
     # The clause conditions this on the shaft carrying 1.25x the column
@@ -724,6 +828,25 @@ def _build_checks(
             mu_lle <= lle_mu_limit,
             f"mu_LLE={mu_lle:.2f} <= {lle_mu_limit:g} "
             f"(Dd_LLE={max(b.lle_demand.disp_demand for b in bounds):.2f} in)",
+        ))
+
+    # 13. Soil-pile stability (only for fixity_source="soil"): the p-y analysis
+    # must return a physical (positive, bounded) head deflection for every soil
+    # bound.  A non-converged / negative / runaway solution means the soil is too
+    # soft or the shaft too short/slender for the demand (possibly P-Δ buckling):
+    # the design must FAIL, never be credited with a stiff base.
+    soil_bounds = [b for b in bounds if b.soil_solution is not None]
+    if soil_bounds:
+        unstable = [b for b in soil_bounds if not b.soil_solution.stable]
+        n_ok = len(soil_bounds) - len(unstable)
+        note = (f"{n_ok}/{len(soil_bounds)} soil bounds converged to a physical "
+                "solution")
+        if unstable:
+            note += ("; UNSTABLE: soil too soft / shaft too short or slender for "
+                     "the pile-head force (increase embedment or shaft size, or "
+                     "improve the soil)")
+        checks.append(Check(
+            "Soil-pile stability (p-y)", len(unstable), 0, not unstable, note,
         ))
 
     return checks

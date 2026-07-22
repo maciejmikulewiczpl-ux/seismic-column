@@ -21,10 +21,16 @@ from seismic_column.io_schema import (
     COLUMNS,
     COLUMN_META,
     GlobalConfig,
+    SOIL_COLUMN_META,
+    SOIL_COLUMNS,
+    build_soil_profile,
     default_dataframe,
+    default_soil_layers,
     load_project,
+    pile_profile_table,
     project_from_json,
     project_to_json,
+    py_curves_table,
     save_project,
     validate,
 )
@@ -74,6 +80,14 @@ _DEFAULTS = {
     "self_weight_in_axial": True,
     "project_path": "",       # current project file for in-place Save/Open
     "editor_version": 0,      # bump to force the batch editor to re-init
+    # soil-structure interaction (point of fixity)
+    "fixity_source": "multiplier",
+    "water_table_ft": 10.0,
+    "shaft_embed_ft": 60.0,
+    "soil_stiff_factor": 2.0,
+    "soil_soft_factor": 0.5,
+    "soil_df": pd.DataFrame(default_soil_layers()),
+    "soil_version": 0,
 }
 for _k, _v in _DEFAULTS.items():
     st.session_state.setdefault(_k, _v)
@@ -116,6 +130,12 @@ def _build_config() -> GlobalConfig:
         concrete_unit_weight=s("concrete_unit_weight"),
         self_weight_mass_factor=s("self_weight_mass_factor"),
         self_weight_in_axial=s("self_weight_in_axial"),
+        fixity_source=s("fixity_source"),
+        water_table_ft=s("water_table_ft"),
+        shaft_embed_ft=s("shaft_embed_ft"),
+        soil_stiff_factor=s("soil_stiff_factor"),
+        soil_soft_factor=s("soil_soft_factor"),
+        soil_layers=tuple(s("soil_df").dropna(how="all").to_dict("records")),
     )
 
 
@@ -151,6 +171,14 @@ def _load_project_into_state(df: pd.DataFrame, cfg: GlobalConfig) -> None:
     s["concrete_unit_weight"] = cfg.concrete_unit_weight
     s["self_weight_mass_factor"] = cfg.self_weight_mass_factor
     s["self_weight_in_axial"] = cfg.self_weight_in_axial
+    s["fixity_source"] = getattr(cfg, "fixity_source", "multiplier")
+    s["water_table_ft"] = getattr(cfg, "water_table_ft", 10.0)
+    s["shaft_embed_ft"] = getattr(cfg, "shaft_embed_ft", 60.0)
+    s["soil_stiff_factor"] = getattr(cfg, "soil_stiff_factor", 2.0)
+    s["soil_soft_factor"] = getattr(cfg, "soil_soft_factor", 0.5)
+    if getattr(cfg, "soil_layers", ()):
+        s["soil_df"] = pd.DataFrame(list(cfg.soil_layers))
+        s["soil_version"] = s.get("soil_version", 0) + 1
 
 
 st.title("Circular RC Column on Type II Shaft — Seismic Optimiser")
@@ -364,6 +392,37 @@ with st.sidebar:
     st.number_input("ρl min", 0.005, 0.03, key="rho_l_min", step=0.001, format="%.3f")
     st.number_input("ρl max", 0.02, 0.08, key="rho_l_max", step=0.001, format="%.3f")
 
+    st.subheader("Point of fixity")
+    st.radio(
+        "Source", ["multiplier", "soil"], key="fixity_source", horizontal=True,
+        help="**multiplier**: assumed Df = 3×/6× shaft diameter (upper/lower "
+             "stiffness). **soil**: nonlinear p-y (LPile-equivalent) analysis of "
+             "the column + shaft on the strata below, giving a mechanics-based "
+             "depth to fixity.")
+    if st.session_state["fixity_source"] == "soil":
+        st.number_input("Embedded shaft length (ft)", 10.0, 300.0,
+                        key="shaft_embed_ft", step=5.0)
+        st.number_input("Groundwater depth (ft, below top of shaft)", 0.0, 300.0,
+                        key="water_table_ft", step=1.0)
+        c1, c2 = st.columns(2)
+        c1.number_input("Stiff-soil bound ×", 1.0, 5.0, key="soil_stiff_factor",
+                        step=0.5, help="Upper-bound p-y modulus multiplier.")
+        c2.number_input("Soft-soil bound ×", 0.1, 1.0, key="soil_soft_factor",
+                        step=0.1, help="Lower-bound p-y modulus multiplier.")
+        st.caption("Strata (top → bottom), LPile-style inputs — your geotech's "
+                   "LPile soil table maps here 1:1.")
+        soil_cfg = {c: st.column_config.TextColumn(SOIL_COLUMN_META[c][0],
+                                                   help=SOIL_COLUMN_META[c][1])
+                    if c in ("layer", "py_model")
+                    else st.column_config.NumberColumn(SOIL_COLUMN_META[c][0],
+                                                       help=SOIL_COLUMN_META[c][1])
+                    for c in SOIL_COLUMNS}
+        edited_soil = st.data_editor(
+            st.session_state["soil_df"], num_rows="dynamic", width="stretch",
+            key=f"soil_editor_{st.session_state['soil_version']}",
+            column_config=soil_cfg)
+        st.session_state["soil_df"] = edited_soil
+
 cfg = _build_config()
 
 
@@ -485,6 +544,66 @@ if "summary" in st.session_state:
             ax2.set_title("Spectra & effective periods")
             ax2.legend(fontsize=8)
             st.pyplot(fig2)
+
+        # p-y pile response: deflection / shear / moment diagrams (soil fixity)
+        ig = rr.assessment.inground_solution
+        soil_bounds = [b for b in rr.assessment.bounds if b.soil_solution]
+        if ig is not None or soil_bounds:
+            st.markdown("**Pile response diagrams (p-y)** — distance below the "
+                        "column top; ground line (top of shaft) dashed. Solid = "
+                        "**shaft-design demand at column overstrength Mo**; "
+                        "dashed = yield-level stiffness bounds.")
+            cols = st.columns(3)
+            for ax_col, attr, xlabel, scale in (
+                    (cols[0], "y", "deflection (in)", 1.0),
+                    (cols[1], "shear", "shear (kip)", 1.0),
+                    (cols[2], "moment", "moment (kip-ft)", 1.0 / 12.0)):
+                fig3, ax3 = plt.subplots()
+                for b in soil_bounds:                       # yield-level bounds
+                    s = b.soil_solution
+                    ax3.plot(getattr(s, attr) * scale, s.x, "--", lw=0.8,
+                             alpha=0.6, label=f"{b.soil_label} (yield)")
+                if ig is not None:                          # overstrength design
+                    ax3.plot(getattr(ig, attr) * scale, ig.x, "k-", lw=1.6,
+                             label="overstrength (design)")
+                ref = ig if ig is not None else soil_bounds[0].soil_solution
+                ax3.axhline(ref.x[ref.ground_index], ls="--", color="0.5", lw=1)
+                ax3.axvline(0, color="0.7", lw=0.6)
+                ax3.invert_yaxis()
+                ax3.set_xlabel(xlabel)
+                ax3.set_ylabel("dist. from column top (in)")
+                ax3.legend(fontsize=7)
+                ax_col.pyplot(fig3)
+
+            # p-y curves at representative depths + exports for the global model
+            prof = build_soil_profile(cfg)
+            if prof is not None:
+                Dsh = rr.shaft.D
+                depths = prof.representative_depths(Dsh, cfg.shaft_embed_ft * 12.0)
+                e1, e2 = st.columns([3, 2])
+                with e1:
+                    figpy, axpy = plt.subplots()
+                    for z in depths:
+                        ys, ps = prof.py_curve(z, Dsh)
+                        axpy.plot(ys, ps, label=f"{z/12:.1f} ft")
+                    axpy.set_xlabel("y (in)")
+                    axpy.set_ylabel("p (kip/in)")
+                    axpy.set_title("p-y curves by depth")
+                    axpy.legend(fontsize=7, title="depth")
+                    st.pyplot(figpy)
+                with e2:
+                    st.caption("Export for the global structural model:")
+                    _sol = ig if ig is not None else \
+                        rr.assessment.governing_bound.soil_solution
+                    prof_df = pile_profile_table(_sol)
+                    st.download_button(
+                        "Pile deflection/shear/moment (CSV)",
+                        prof_df.to_csv(index=False).encode(),
+                        f"pile_profile_{rr.name}.csv", "text/csv")
+                    py_df = py_curves_table(prof, Dsh, depths)
+                    st.download_button(
+                        "p-y curves (CSV)", py_df.to_csv(index=False).encode(),
+                        f"py_curves_{rr.name}.csv", "text/csv")
 
         report_md = column_report(rr)
         st.markdown(report_md)
