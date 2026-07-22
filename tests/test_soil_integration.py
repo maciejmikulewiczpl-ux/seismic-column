@@ -215,6 +215,45 @@ def test_soil_presets_build_and_solve():
         df_eq["SeaTac Piers A8–A11 (GWT 10 ft)"]
 
 
+def test_optimizer_sizes_shaft_for_inground_py_demand():
+    """The optimiser escalates shaft steel until the p-y IN-GROUND flexure and
+    shear checks pass — the demand depends on the shaft's own stiffness, so this
+    exercises the size->re-solve->resize fixed-point iteration."""
+    from seismic_column.optimizer import (
+        ColumnDesign, OptimizeSpec, optimize_column)
+    from seismic_column.io_schema import (
+        load_soil_preset, build_soil_profile, GlobalConfig)
+    from seismic_column.provisions import get_provisions
+    prov = get_provisions("AASHTO SGS 3rd Ed.")
+    wt, layers = load_soil_preset("SeaTac Piers A8–A11 (GWT 10 ft)")
+    prof = build_soil_profile(GlobalConfig(fixity_source="soil",
+                                           water_table_ft=wt,
+                                           soil_layers=tuple(layers)))
+    col = ColumnDesign(D=60, fc=5, cover=2, n_bars=30, long_bar_no=10,
+                       spiral_bar_no=6, spiral_spacing=4, fce_floor=5.0)
+    # deliberately light starting shaft so the in-ground checks start failing
+    shaft = ColumnDesign(D=96, fc=5, cover=6, n_bars=30, long_bar_no=8,
+                         spiral_bar_no=4, spiral_spacing=6, fce_floor=5.0)
+    geom = Geometry(Hcol=20 * 12, D_shaft=96)
+    spec = DesignSpectrum(Sds=1.0, Sd1=0.6)
+    soil_kw = dict(fixity_source="soil", soil_profile=prof,
+                   shaft_embed_length=int(prof.depth), soil_bounds=(2.0, 0.5))
+
+    a0 = evaluate_column(col.section(), shaft.section(), geom, spec, 1500, 1500,
+                         provisions=prov, **soil_kw)
+    before = {c.name: c.passed for c in a0.checks if "in-ground" in c.name}
+    assert before and not all(before.values())          # starts failing
+
+    res = optimize_column(col, shaft, geom, spec, 1500, 1500,
+                          spec=OptimizeSpec(variable={"longitudinal", "confinement"},
+                                            priority=("longitudinal", "confinement")),
+                          provisions=prov, **soil_kw)
+    ig = [c for c in res.assessment.checks if "in-ground" in c.name]
+    assert ig and all(c.passed for c in ig)             # sized to pass
+    # the shaft steel was escalated above the (light) starting cage
+    assert res.shaft.rho_l() > shaft.rho_l()
+
+
 def test_pile_cache_reuse():
     """A repeated identical evaluation reuses the cached pile solve."""
     from seismic_column import sdc_capacity as sc

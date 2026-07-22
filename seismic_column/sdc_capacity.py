@@ -436,6 +436,31 @@ def _cached_pile_solve(Hcol, L_embed, EI_col, EI_shaft, D_shaft, axial,
     return sol
 
 
+def inground_demand(Hcol, L_embed, EI_col, EI_shaft, D_shaft, axial,
+                    soil_profile: SoilProfile, V_head,
+                    soil_bounds=(2.0, 0.5)):
+    """Max below-ground shaft moment & shear at the applied head force ``V_head``.
+
+    Runs the p-y solve over the soil-stiffness bounds (envelope) and returns
+    ``(M, V, governing_solution)`` — the capacity-protection demand the shaft
+    must carry ALONG ITS DEPTH.  ``M``/``V`` are 0 (and the solution ``None``)
+    if every bound is unstable.  Shared by ``evaluate_column`` and the optimiser
+    so both size to the identical demand.
+    """
+    M, V, gov = 0.0, 0.0, None
+    for factor in soil_bounds:
+        prof = replace(soil_profile,
+                       stiffness_factor=soil_profile.stiffness_factor * factor)
+        s = _cached_pile_solve(Hcol, L_embed, EI_col, EI_shaft, D_shaft, axial,
+                               prof, V_head)
+        if not s.stable:
+            continue
+        if s.max_inground_moment >= M:
+            M, gov = s.max_inground_moment, s
+        V = max(V, s.max_inground_shear)
+    return M, V, gov
+
+
 def evaluate_column(
     column: CircularSection,
     shaft: CircularSection,
@@ -578,16 +603,9 @@ def evaluate_column(
     if fixity_source == "soil" and soil_profile is not None:
         Vo = Mo / geometry.Hcol
         L_embed = shaft_embed_length or soil_profile.depth
-        for factor in soil_bounds:
-            prof = replace(soil_profile,
-                           stiffness_factor=soil_profile.stiffness_factor * factor)
-            s = _cached_pile_solve(geometry.Hcol, L_embed, EI_col, EI_shaft,
-                                   geometry.D_shaft, P_used, prof, Vo)
-            if not s.stable:
-                continue
-            if s.max_inground_moment >= inground_M:
-                inground_M, inground = s.max_inground_moment, s
-            inground_V = max(inground_V, s.max_inground_shear)
+        inground_M, inground_V, inground = inground_demand(
+            geometry.Hcol, L_embed, EI_col, EI_shaft, geometry.D_shaft, P_used,
+            soil_profile, Vo, soil_bounds)
 
     checks = _build_checks(
         column, shaft, geometry, mc_col, mc_shaft, Lp, Mo, P_used, shaft_axial,

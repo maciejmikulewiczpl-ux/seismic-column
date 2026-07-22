@@ -27,6 +27,7 @@ from .sdc_capacity import (
     ColumnAssessment,
     column_self_weight,
     evaluate_column,
+    inground_demand,
     shear_capacity,
 )
 
@@ -197,87 +198,133 @@ def _ascending_from(values: tuple[float, ...], current: float) -> list[float]:
 # ---------------------------------------------------------------------------
 # Cached plastic moment (for fast shaft sizing across many column candidates)
 # ---------------------------------------------------------------------------
-_MP_CACHE: dict[tuple, float] = {}
+_MC_CACHE: dict[tuple, object] = {}
 
 
-def _plastic_moment(design: ColumnDesign, axial: float) -> float:
+def _mc_cached(design: ColumnDesign, axial: float):
     key = (design.D, design.fc, design.cover, design.n_bars, design.long_bar_no,
            design.long_bundle, design.spiral_bar_no, design.spiral_spacing,
            design.spiral_bundle, design.fye, design.fue, design.fyh,
            design.fce_factor, design.fce_floor, round(axial, 3))
-    if key not in _MP_CACHE:
-        _MP_CACHE[key] = moment_curvature(design.section(), axial).Mp
-    return _MP_CACHE[key]
+    if key not in _MC_CACHE:
+        _MC_CACHE[key] = moment_curvature(design.section(), axial)
+    return _MC_CACHE[key]
+
+
+def _plastic_moment(design: ColumnDesign, axial: float) -> float:
+    return _mc_cached(design, axial).Mp
+
+
+def _eff_EI(design: ColumnDesign, axial: float) -> float:
+    """Cracked effective EI (Mp/φy) — the shaft stiffness fed to the p-y solve."""
+    return _mc_cached(design, axial).EI_eff
 
 
 # ---------------------------------------------------------------------------
 # Shaft capacity-protection sizing
 # ---------------------------------------------------------------------------
-def size_shaft(column: ColumnDesign, shaft_start: ColumnDesign, ctx: _Ctx) -> ColumnDesign:
-    """Size shaft longitudinal + transverse steel for capacity protection.
-
-    Flexure: shaft Mn >= column overstrength moment demand (per basis).
-    Shear:   phi*Vn_shaft >= column overstrength shear Vo = Mo/Hcol.
-    """
-    spec = ctx.spec
-    P_col = ctx.effective_axial(column.D)
-    Mo = ctx.provisions.overstrength_factor * _plastic_moment(column, P_col)
-    Vo = Mo / ctx.geometry.Hcol
-    if ctx.shaft_moment_basis == "fixity":
-        Df = max(ctx.geometry.fixity_depth(m) for m in ctx.mults)
-        m_demand = Mo * (ctx.geometry.Hcol + Df) / ctx.geometry.Hcol
-    else:
-        m_demand = Mo
-    # SGS 8.9 capacity-protection amplification must be applied here too, or the
-    # optimiser sizes for Mo and the check then demands gamma*Mo and fails.
-    m_demand *= ctx.provisions.shaft_demand_factor
-
-    shaft = replace(shaft_start)
-
-    # --- longitudinal: smallest that develops the required flexural capacity ---
+def _size_shaft_longitudinal(shaft: ColumnDesign, m_demand: float,
+                             P_col: float, spec: OptimizeSpec) -> ColumnDesign:
+    """Smallest longitudinal cage whose Mn >= ``m_demand`` (heaviest if none)."""
     # The Type II shaft is capacity-protected (not ductility-limited).  Escalate
     # only as needed: conventional single-layer bars first, then add #18, then
     # allow bundling — up to the 0.04 "compression member" max (SGS 8.8.1 /
     # SDC 5.3.9.1).  This keeps a conventional cage unless heavy steel is forced.
     augmented = tuple(sorted(set(spec.bar_numbers) | {14, 18}))
     tiers = ((spec.bar_numbers, False), (augmented, False), (augmented, True))
-    chosen = None
     for bars, bundle_ok in tiers:
         ladder = _longitudinal_ladder(
             shaft, replace(spec, bar_numbers=bars, allow_bundling=bundle_ok))
         for n, b, bundle in ladder:
             cand = replace(shaft, n_bars=n, long_bar_no=b, long_bundle=bundle)
             if _plastic_moment(cand, P_col) >= m_demand:
-                chosen = cand
-                break
-        if chosen is not None:
-            break
-    if chosen is None:                                # exhausted -> heaviest option
-        ladder = _longitudinal_ladder(
-            shaft, replace(spec, bar_numbers=augmented, allow_bundling=True))
-        if ladder:
-            n, b, bundle = ladder[-1]
-            chosen = replace(shaft, n_bars=n, long_bar_no=b, long_bundle=bundle)
-    if chosen is not None:
-        shaft = chosen
+                return cand
+    ladder = _longitudinal_ladder(                    # exhausted -> heaviest
+        shaft, replace(spec, bar_numbers=augmented, allow_bundling=True))
+    if ladder:
+        n, b, bundle = ladder[-1]
+        return replace(shaft, n_bars=n, long_bar_no=b, long_bundle=bundle)
+    return shaft
 
-    # --- transverse: smallest that develops the required shear capacity AND,
-    # for an oversized shaft, the confinement fraction of SGS 8.8.12 ---
-    frac = ctx.provisions.shaft_confinement_fraction
-    rho_s_req = frac * column.section().rho_s if frac is not None else 0.0
+
+def _size_shaft_transverse(shaft: ColumnDesign, v_demand: float, rho_s_req: float,
+                           P_col: float, provisions: CodeProvisions,
+                           spec: OptimizeSpec) -> ColumnDesign:
+    """Smallest transverse steel giving phi*Vn >= ``v_demand`` and rho_s >= req."""
     for b, s, bundle in _confinement_ladder(spec):
         cand = replace(shaft, spiral_bar_no=b, spiral_spacing=s, spiral_bundle=bundle)
         sec = cand.section()
-        phiVn, _, _ = shear_capacity(sec, P_col, mu_d=1.0,
-                                     inside_hinge=False,
-                                     provisions=ctx.provisions)
-        if phiVn >= Vo and sec.rho_s >= rho_s_req:
-            shaft = cand
-            break
-    else:
-        b, s, bundle = _confinement_ladder(spec)[-1]
-        shaft = replace(shaft, spiral_bar_no=b, spiral_spacing=s, spiral_bundle=bundle)
+        phiVn, _, _ = shear_capacity(sec, P_col, mu_d=1.0, inside_hinge=False,
+                                     provisions=provisions)
+        if phiVn >= v_demand and sec.rho_s >= rho_s_req:
+            return cand
+    b, s, bundle = _confinement_ladder(spec)[-1]        # exhausted -> heaviest
+    return replace(shaft, spiral_bar_no=b, spiral_spacing=s, spiral_bundle=bundle)
 
+
+def _same_shaft(a: ColumnDesign, b: ColumnDesign) -> bool:
+    return (a.n_bars, a.long_bar_no, a.long_bundle, a.spiral_bar_no,
+            a.spiral_spacing, a.spiral_bundle) == \
+           (b.n_bars, b.long_bar_no, b.long_bundle, b.spiral_bar_no,
+            b.spiral_spacing, b.spiral_bundle)
+
+
+def size_shaft(column: ColumnDesign, shaft_start: ColumnDesign, ctx: _Ctx) -> ColumnDesign:
+    """Size shaft longitudinal + transverse steel for capacity protection.
+
+    Flexure: shaft Mn >= gamma * (column overstrength moment demand).
+    Shear:   phi*Vn_shaft >= column overstrength shear Vo = Mo/Hcol.
+
+    In p-y (soil) mode the demand includes the IN-GROUND moment/shear the shaft
+    carries below grade at column overstrength — which usually peaks below the
+    interface and exceeds the interface value.  That demand depends on the shaft
+    stiffness, so we iterate (size -> re-solve p-y -> resize) to a fixed point,
+    the shaft-size iteration Caltrans SDC 2.1 §C6.2.5.3 describes.
+    """
+    spec = ctx.spec
+    P_col = ctx.effective_axial(column.D)
+    gamma = ctx.provisions.shaft_demand_factor
+    Mo = ctx.provisions.overstrength_factor * _plastic_moment(column, P_col)
+    Vo = Mo / ctx.geometry.Hcol
+    if ctx.shaft_moment_basis == "fixity":
+        Df = max(ctx.geometry.fixity_depth(m) for m in ctx.mults)
+        m_interface = Mo * (ctx.geometry.Hcol + Df) / ctx.geometry.Hcol
+    else:
+        m_interface = Mo
+    # SGS 8.9 capacity-protection amplification must be applied here too, or the
+    # optimiser sizes for Mo and the check then demands gamma*Mo and fails.
+    m_interface *= gamma
+
+    frac = ctx.provisions.shaft_confinement_fraction
+    rho_s_req = frac * column.section().rho_s if frac is not None else 0.0
+
+    soil_mode = ctx.fixity_source == "soil" and ctx.soil_profile is not None
+    EI_col = _eff_EI(column, P_col) if soil_mode else 0.0
+    L_embed = (ctx.shaft_embed_length or
+               (ctx.soil_profile.depth if ctx.soil_profile else 0.0))
+
+    shaft = replace(shaft_start)
+    # A single pass covers the interface demand; in soil mode iterate so the
+    # in-ground p-y demand (a function of the shaft's own EI) converges.  Steel
+    # increases capacity faster than it stiffens the shaft, so this settles in a
+    # few passes; the loop is capped and returns the last (conservative) size.
+    for _ in range(6):
+        m_demand, v_demand = m_interface, Vo
+        if soil_mode:
+            EI_shaft = _eff_EI(shaft, P_col)
+            M_ig, V_ig, _ = inground_demand(
+                ctx.geometry.Hcol, L_embed, EI_col, EI_shaft,
+                ctx.geometry.D_shaft, P_col, ctx.soil_profile, Vo, ctx.soil_bounds)
+            m_demand = max(m_demand, gamma * M_ig)
+            v_demand = max(v_demand, V_ig)
+        new_shaft = _size_shaft_longitudinal(shaft, m_demand, P_col, spec)
+        new_shaft = _size_shaft_transverse(new_shaft, v_demand, rho_s_req, P_col,
+                                           ctx.provisions, spec)
+        if _same_shaft(new_shaft, shaft):
+            return new_shaft
+        shaft = new_shaft
+        if not soil_mode:                              # no iteration needed
+            break
     return shaft
 
 
