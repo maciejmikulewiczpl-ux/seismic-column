@@ -232,19 +232,17 @@ def _cage_at_ratio(design: ColumnDesign, spec: OptimizeSpec,
     return replace(design, n_bars=n, long_bar_no=b, long_bundle=bundle)
 
 
-def required_shaft_diameter(col_D: float, base_shaft_D: float, oversize: float,
+def required_shaft_diameter(col_D: float, oversize: float,
                             shaft_sizes: tuple[float, ...]) -> float:
-    """Shaft diameter keeping the Type II oversize as the column grows.
+    """Shaft diameter derived from the column: the smallest standard shaft size
+    that is at least ``oversize`` inches larger than the column.
 
-    The entered shaft ``base_shaft_D`` is the floor; when the column would
-    encroach on the oversize (``col_D + oversize > base_shaft_D``) the shaft is
-    grown to the next standard size >= ``col_D + oversize``.  So the shaft is
-    always at least ``oversize`` inches larger than the column, and the user's
-    entered size is never reduced.
+    The shaft ALWAYS tracks the column by the oversize — it is not floored by any
+    entered shaft size, so shrinking the column (e.g. the "smallest column"
+    objective) shrinks the shaft too.  The entered shaft diameter is therefore a
+    starting value only; the optimiser overwrites it.
     """
     required = col_D + oversize
-    if required <= base_shaft_D:
-        return base_shaft_D
     for s in sorted(shaft_sizes):
         if s >= required:
             return s
@@ -448,15 +446,14 @@ def optimize_column(
     design = replace(start)
     log: list[str] = []
     state = {"iters": 0, "shaft": replace(shaft_start)}
-    # keep the shaft at least this many inches larger than the column (Type II
-    # oversize); the code minimum is a hard floor, the user's value can be more.
-    base_shaft_D = shaft_start.D
+    # the shaft ALWAYS tracks the column by this oversize (Type II); the entered
+    # shaft is only a starting value.  The code minimum is a hard floor, the
+    # user's value can be more.
     min_oversize = max(spec.min_shaft_oversize, provisions.min_shaft_oversize)
 
     def assess(d: ColumnDesign) -> ColumnAssessment:
-        # grow the shaft to preserve the oversize as the column grows
-        shaft_D = required_shaft_diameter(d.D, base_shaft_D, min_oversize,
-                                          spec.shaft_diameters)
+        # derive the shaft diameter from the column + oversize (tracks up & down)
+        shaft_D = required_shaft_diameter(d.D, min_oversize, spec.shaft_diameters)
         geom_d = (geometry if shaft_D == geometry.D_shaft
                   else replace(geometry, D_shaft=shaft_D))
         ctx_d = ctx if geom_d is geometry else replace(ctx, geometry=geom_d)

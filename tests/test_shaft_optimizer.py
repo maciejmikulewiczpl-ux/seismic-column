@@ -73,9 +73,9 @@ def test_shaft_grows_with_column_to_keep_oversize():
     from seismic_column.provisions import get_provisions
 
     sizes = tuple(range(36, 181, 6))
-    assert required_shaft_diameter(36, 60, 24, sizes) == 60   # user floor kept
-    assert required_shaft_diameter(54, 60, 24, sizes) == 78   # grown to col+24
-    assert required_shaft_diameter(48, 60, 24, sizes) == 72
+    assert required_shaft_diameter(42, 24, sizes) == 66   # tracks DOWN to col+24
+    assert required_shaft_diameter(54, 24, sizes) == 78   # = col + 24
+    assert required_shaft_diameter(48, 24, sizes) == 72
 
     col = ColumnDesign(D=36, fc=5, cover=2, n_bars=16, long_bar_no=9,
                        spiral_bar_no=5, spiral_spacing=4)
