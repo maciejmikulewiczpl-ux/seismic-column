@@ -37,6 +37,14 @@ from .sdc_capacity import (
 PARAMETERS = ("longitudinal", "confinement", "diameter", "fc")
 DEFAULT_PRIORITY = ("longitudinal", "confinement", "diameter", "fc")
 
+# Checks fixed by MORE confinement that only get WORSE with more longitudinal
+# steel (the required min transverse ratio rises with steel; the column shear
+# demand Vo = Mo/Hcol rises with Mp).  If the minimum-steel column already fails
+# one of these at a given confinement, no amount of longitudinal steel helps —
+# the confinement is simply too light — so the fixed-diameter search skips
+# straight to a heavier confinement instead of a futile longitudinal sweep.
+_CONF_GATED = frozenset({"Transverse steel ratio (min)", "Column shear"})
+
 
 @dataclass
 class ColumnDesign:
@@ -497,14 +505,47 @@ def optimize_column(
 
     all_inner = tuple(p for p in spec.priority if p != "diameter")
 
-    # Fixed column diameter — either the user excluded it from the search, or the
+    def _set_conf(d: ColumnDesign, rung) -> ColumnDesign:
+        b, s, bundle = rung
+        return replace(d, spiral_bar_no=b, spiral_spacing=s, spiral_bundle=bundle)
+
+    def size_reinf(base: ColumnDesign):
+        """Minimum reinforcement at a fixed diameter — ALWAYS starting from the
+        minimum longitudinal + transverse + f'c, independent of the entered
+        values.
+
+        Longitudinal and confinement interact (light confinement fails
+        shear/transverse, and the required min transverse rises with longitudinal
+        steel), so a single-parameter greedy can max the steel uselessly.  This
+        does a robust 2-D search: for each confinement level (lightest first),
+        greedily size the longitudinal (+ f'c); return the first feasible.  So it
+        finds the lightest confinement that admits a feasible column, with the
+        least longitudinal for it.
+        """
+        seed = _min_steel_design(base, spec) if "longitudinal" in spec.variable else base
+        if "fc" in spec.variable:
+            seed = replace(seed, fc=min(spec.fc_values))
+        if "confinement" not in spec.variable:
+            return greedy_fixed(seed, all_inner)
+        last = None
+        for rung in _confinement_ladder(spec):        # ALWAYS lightest first
+            base_c = _set_conf(seed, rung)            # (ignores the entered value)
+            a0 = assess(base_c)                       # min-steel probe at this conf
+            last = (base_c, a0, state["shaft"])
+            if a0.passed:
+                return last
+            if {c.name for c in a0.checks if not c.passed} & _CONF_GATED:
+                continue                              # too light — heavier conf
+            d, a, sh = greedy_fixed(base_c, ("longitudinal", "fc"))   # size steel
+            last = (d, a, sh)
+            if a.passed:
+                return last
+        return last
+
+    # Fixed column diameter — the user excluded it from the search, or the
     # "fixed_diameter" objective (pick the diameter, minimise the reinforcement).
-    # Seed the MIN steel so the greedy escalation returns the smallest feasible
-    # longitudinal ratio at the entered diameter.
     if "diameter" not in spec.variable or spec.objective == "fixed_diameter":
-        seed = (_min_steel_design(design, spec)
-                if "longitudinal" in spec.variable else design)
-        d, a, sh = greedy_fixed(seed, all_inner)
+        d, a, sh = size_reinf(design)
         log.append(f"Fixed D={d.D:g} in: "
                    + (f"feasible at rho_l={d.rho_l():.4f}" if a.passed
                       else "no feasible reinforcement"))
@@ -536,6 +577,8 @@ def optimize_column(
                 # so RAISES the overstrength shear/shaft demand, i.e. both too
                 # little steel (low capacity) AND too much (high demand) fail, so
                 # the feasible band is in the middle.  The steel must be searched.
+                # (The full 2-D size_reinf is too slow to run per diameter probe;
+                # the diameter search itself compensates for the interaction.)
                 d, a, sh = greedy_fixed(_min_steel_design(base, spec), all_inner)
             probed[i] = (d, sh, a)
             log.append(f"D={diams[i]:g} in: "

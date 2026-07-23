@@ -176,3 +176,34 @@ def test_fixed_diameter_objective_minimises_steel_at_entered_size():
     assert res.design.D == 54                         # diameter untouched
     assert res.design.rho_l() < col.rho_l()           # steel reduced to minimum
     assert res.design.rho_l() >= 0.01 - 1e-9          # not below the floor
+
+
+def test_fixed_diameter_result_is_independent_of_entered_reinforcement():
+    """Regression: the optimiser must start from the MINIMUM longitudinal and
+    transverse regardless of what reinforcement was entered — a heavy input used
+    to be carried into the search (inflating Mp and failing shaft shear, or
+    masking the true minimum), so heavy vs light inputs gave different answers."""
+    from seismic_column.optimizer import ColumnDesign, OptimizeSpec, optimize_column
+    from seismic_column.geometry import Geometry
+    from seismic_column.demand import DesignSpectrum
+    from seismic_column.provisions import get_provisions
+    shaft = ColumnDesign(D=84, fc=5, cover=6, n_bars=24, long_bar_no=11,
+                         spiral_bar_no=6, spiral_spacing=4, fce_floor=5.0)
+    geom = Geometry(Hcol=22 * 12, D_shaft=84)
+    spec = DesignSpectrum(Sds=1.0, Sd1=0.6)
+    sp = OptimizeSpec(variable={"longitudinal", "confinement", "fc"},
+                      objective="fixed_diameter")
+
+    def run(col):
+        return optimize_column(col, shaft, geom, spec, 900, 900, spec=sp,
+                               provisions=get_provisions("SDC 2.1")).design
+
+    heavy = run(ColumnDesign(D=60, fc=6, cover=2, n_bars=44, long_bar_no=14,
+                             spiral_bar_no=8, spiral_spacing=3, fce_floor=5.0))
+    light = run(ColumnDesign(D=60, fc=5, cover=2, n_bars=12, long_bar_no=8,
+                             spiral_bar_no=4, spiral_spacing=6, fce_floor=5.0))
+    # identical design regardless of the entered reinforcement
+    assert (heavy.n_bars, heavy.long_bar_no, heavy.spiral_bar_no,
+            heavy.spiral_spacing, heavy.fc) == \
+           (light.n_bars, light.long_bar_no, light.spiral_bar_no,
+            light.spiral_spacing, light.fc)
