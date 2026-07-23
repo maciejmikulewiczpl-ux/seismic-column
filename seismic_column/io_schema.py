@@ -343,12 +343,30 @@ def write_table(df: pd.DataFrame, path: str | Path) -> None:
         df.to_csv(p, index=False)
 
 
-def validate(df: pd.DataFrame, min_shaft_oversize: float = 0.0) -> pd.DataFrame:
+# Reinforcement / f'c the optimiser DETERMINES; these may be left blank on an
+# optimise run ("you decide") — validate fills a minimum placeholder the
+# optimiser overwrites.  Geometry, loads, cover and fixity multipliers are not
+# optimiser-chosen, so a blank there is still an error.
+OPTIMIZED_COLUMNS: frozenset[str] = frozenset({
+    "fc_ksi", "n_bars", "long_bar_no", "long_bundle",
+    "spiral_bar_no", "spiral_spacing_in", "spiral_bundle",
+    "shaft_fc_ksi", "shaft_n_bars", "shaft_long_bar_no", "shaft_long_bundle",
+    "shaft_spiral_bar_no", "shaft_spiral_spacing_in", "shaft_spiral_bundle",
+})
+
+
+def validate(df: pd.DataFrame, min_shaft_oversize: float = 0.0,
+             optimize: bool = False) -> pd.DataFrame:
     """Validate and normalise a batch table, filling defaults for missing cols.
 
     ``min_shaft_oversize`` is the required ``D_shaft - Dcol`` in inches: 0 for
     AASHTO SGS ("larger in diameter", Owner's discretion) and 24 for Caltrans
     SDC, whose Type II definition demands at least 24 in.
+
+    ``optimize``: when True, blank reinforcement / f'c cells (the values the
+    optimiser determines, :data:`OPTIMIZED_COLUMNS`) are filled with a minimum
+    placeholder instead of erroring — so an optimise run can leave the rebar
+    blank.  Other blanks (loads, height, diameters, cover) still error.
     """
     df = df.copy()
     missing_required = {"Hcol_ft", "D_shaft_in", "weight_kip", "axial_kip", "Dcol_in"}
@@ -364,6 +382,9 @@ def validate(df: pd.DataFrame, min_shaft_oversize: float = 0.0) -> pd.DataFrame:
 
     for col in NUMERIC_COLUMNS:
         df[col] = pd.to_numeric(df[col], errors="coerce")
+    if optimize:                                   # blank rebar/f'c = "you decide"
+        for col in OPTIMIZED_COLUMNS:
+            df[col] = df[col].fillna(defaults[col])
     int_cols = ("n_bars", "long_bar_no", "long_bundle", "spiral_bar_no",
                 "spiral_bundle", "shaft_n_bars", "shaft_long_bar_no",
                 "shaft_long_bundle", "shaft_spiral_bar_no", "shaft_spiral_bundle")

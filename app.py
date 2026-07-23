@@ -494,6 +494,11 @@ st.header("1 · Column batch")
 st.caption("**W (seismic weight)** drives mass → period → demand.  "
            "**P (axial load)** is the sustained compression used for M-φ, "
            "P-Δ and shear.  Hover any header for details.")
+if st.session_state.get("optimize", True):
+    st.caption("💡 When optimising you may leave the **reinforcement and f′c "
+               "cells blank** — the optimiser always starts from the minimum and "
+               "sizes them. Height, loads, diameters and cover are still required. "
+               "(A **check** run needs the reinforcement filled in.)")
 
 upload = st.file_uploader("Import batch table (CSV or Excel)",
                           type=["csv", "xlsx", "xls"], key="batch_up")
@@ -503,7 +508,8 @@ if upload is not None:
             df_in = pd.read_excel(upload)
         else:
             df_in = pd.read_csv(upload)
-        st.session_state["batch_df"] = validate(df_in)
+        # tolerate blank rebar/f'c on import (optimise runs may leave them blank)
+        st.session_state["batch_df"] = validate(df_in, optimize=True)
         st.success(f"Imported {len(st.session_state['batch_df'])} rows.")
     except Exception as exc:
         st.error(f"Import failed: {exc}")

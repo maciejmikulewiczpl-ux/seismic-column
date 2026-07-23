@@ -131,3 +131,26 @@ def test_fractional_spacing_writeback_when_input_is_integer():
     out = results_to_dataframe([rr], v)          # must not raise
     assert out.loc[0, "spiral_spacing_in"] == 3.5
     assert out.loc[0, "shaft_spiral_spacing_in"] == 3.5
+
+
+def test_blank_reinforcement_allowed_when_optimising_but_not_checking():
+    """Optimise runs may leave the rebar/f'c blank (the optimiser sizes them);
+    check runs still require them."""
+    import numpy as np
+    from seismic_column.io_schema import OPTIMIZED_COLUMNS, validate
+    df = default_dataframe(1)
+    for col in OPTIMIZED_COLUMNS:
+        df.loc[0, col] = np.nan
+    # optimise: blanks filled, runs, produces a feasible design
+    _, results = run_batch(df, GlobalConfig(optimize=True,
+                                            variable=("longitudinal", "confinement", "fc")))
+    assert results and results[0].feasible
+    # check: blank reinforcement is an error
+    import pytest
+    with pytest.raises(ValueError, match="missing values"):
+        run_batch(df, GlobalConfig(optimize=False))
+    # a required (non-reinforcement) blank still errors even when optimising
+    df2 = default_dataframe(1)
+    df2.loc[0, "weight_kip"] = np.nan
+    with pytest.raises(ValueError, match="missing values"):
+        run_batch(df2, GlobalConfig(optimize=True))

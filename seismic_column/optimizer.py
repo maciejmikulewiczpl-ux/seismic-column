@@ -223,6 +223,19 @@ def _min_steel_design(design: ColumnDesign, spec: OptimizeSpec) -> ColumnDesign:
     return replace(design, n_bars=n, long_bar_no=b, long_bundle=bundle)
 
 
+def _min_conf_fc(design: ColumnDesign, spec: OptimizeSpec) -> ColumnDesign:
+    """Reset confinement + f'c to their lightest values (for whichever are
+    variable), so a search starts from MINIMUM reinforcement regardless of the
+    entered confinement / f'c."""
+    seed = design
+    if "confinement" in spec.variable:
+        b, s, bundle = _confinement_ladder(spec)[0]        # lightest transverse
+        seed = replace(seed, spiral_bar_no=b, spiral_spacing=s, spiral_bundle=bundle)
+    if "fc" in spec.variable:
+        seed = replace(seed, fc=min(spec.fc_values))
+    return seed
+
+
 def _cage_at_ratio(design: ColumnDesign, spec: OptimizeSpec,
                    target: float) -> ColumnDesign:
     """The lightest longitudinal cage whose ratio is >= ``target`` (heaviest if
@@ -569,17 +582,15 @@ def optimize_column(
         if i not in probed:
             base = replace(start, D=diams[i])
             if fixed_steel:                       # hold longitudinal at ~target
-                seed = _cage_at_ratio(base, spec, target)
+                # start from MIN confinement + f'c (ignore entered values); the
+                # longitudinal is pinned, so there is no interaction trap.
+                seed = _min_conf_fc(_cage_at_ratio(base, spec, target), spec)
                 d, a, sh = greedy_fixed(seed, ("confinement", "fc"))
-            else:                                 # min_diameter: escalate steel
-                # NB: a cheap min/max-steel probe does NOT work here — for a
-                # capacity-protected column MORE longitudinal steel raises Mp and
-                # so RAISES the overstrength shear/shaft demand, i.e. both too
-                # little steel (low capacity) AND too much (high demand) fail, so
-                # the feasible band is in the middle.  The steel must be searched.
-                # (The full 2-D size_reinf is too slow to run per diameter probe;
-                # the diameter search itself compensates for the interaction.)
-                d, a, sh = greedy_fixed(_min_steel_design(base, spec), all_inner)
+            else:                                 # min_diameter: search the steel
+                # Full 2-D search from minimum reinforcement (longitudinal AND
+                # confinement AND f'c) so the result is independent of the entered
+                # values.  size_reinf's pruning keeps a diameter probe cheap.
+                d, a, sh = size_reinf(base)
             probed[i] = (d, sh, a)
             log.append(f"D={diams[i]:g} in: "
                        + (f"feasible at rho_l={d.rho_l():.4f}" if a.passed

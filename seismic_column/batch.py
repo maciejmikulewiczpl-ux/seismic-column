@@ -131,7 +131,8 @@ def run_batch(df: pd.DataFrame, cfg: GlobalConfig,
     (optional) ``(name, iters)`` fires per trial design *within* a column, so a
     single slow (soil p-y) column also shows live movement.
     """
-    df = validate(df, get_provisions(cfg.code).min_shaft_oversize)
+    df = validate(df, get_provisions(cfg.code).min_shaft_oversize,
+                  optimize=cfg.optimize)
     total = len(df)
     results: list[RowResult] = []
     summary_rows: list[dict] = []
@@ -181,7 +182,9 @@ def results_to_dataframe(results: list[RowResult],
     and fixity multipliers are left untouched.  Rows with no matching result
     (e.g. a run error) are left as-is.
     """
-    df = validate(base_df).copy()
+    # write-back only happens for an optimise run, whose input may have left the
+    # rebar blank — tolerate that (optimize=True), the results overwrite it.
+    df = validate(base_df, optimize=True).copy()
     by_name = {r.name: r for r in results}
     for i, name in df["name"].items():
         rr = by_name.get(str(name))
@@ -191,7 +194,7 @@ def results_to_dataframe(results: list[RowResult],
             df.at[i, col] = getattr(rr.design, attr)
         for col, attr in _SHAFT_DESIGN_MAP.items():
             df.at[i, col] = getattr(rr.shaft, attr)
-    return validate(df)
+    return validate(df, optimize=True)
 
 
 def _summary_row(rr: RowResult) -> dict:
