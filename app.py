@@ -18,7 +18,8 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from seismic_column.balance import GEOMETRY_CHECK, STIFFNESS_CHECK
+from seismic_column.balance import (GEOMETRY_CHECK, STIFFNESS_ANY_CHECK,
+                                    STIFFNESS_CHECK)
 from seismic_column.batch import (RowResult, results_to_dataframe,
                                   run_batch_balanced)
 from seismic_column.demand import SpectrumSpec
@@ -28,6 +29,8 @@ from seismic_column.io_schema import (
     GlobalConfig,
     SOIL_COLUMN_META,
     SOIL_COLUMNS,
+    DECK_LINKS,
+    DIRECTIONS,
     TEXT_COLUMNS,
     build_soil_profile,
     default_dataframe,
@@ -98,6 +101,7 @@ _DEFAULTS = {
     "balance_T_ratio_min": 0.70,
     "balance_auto_silo": True,
     "balance_strategy": "min_silo",
+    "balance_direction": DIRECTIONS[0],
     "max_silo_ft": 20.0,
     "silo_step_ft": 1.0,
     # soil-structure interaction (point of fixity)
@@ -610,7 +614,10 @@ if upload is not None:
 col_config = {}
 for c in COLUMNS:
     label, help_txt = COLUMN_META[c]
-    if c in TEXT_COLUMNS:
+    if c == "deck_link":
+        col_config[c] = st.column_config.SelectboxColumn(
+            label, help=help_txt, options=list(DECK_LINKS), required=False)
+    elif c in TEXT_COLUMNS:
         col_config[c] = st.column_config.TextColumn(label, help=help_txt)
     elif c in INT_COLS:
         col_config[c] = st.column_config.NumberColumn(label, help=help_txt, step=1)
@@ -729,12 +736,24 @@ _INK, _MUTED, _GRID = "#52514e", "#898781", "#e1e0d9"
 _OK = _MUTED                            # compliant = recessive, not green
 
 
-def _bound_status(balance, check_name: str) -> dict:
-    """{(pier_i, pier_j, bound_index): BalanceCheck} for one check type."""
+def _bound_status(balance, check_name: str, direction: str,
+                  frames=None) -> dict:
+    """{(pier_i, pier_j, bound_index): BalanceCheck} for one check type.
+
+    The geometry rule is keyed on FRAMES, so when ``frames`` is given each
+    frame key is resolved to a representative pier — the frame's first member —
+    so the check can be drawn as a link on the pier axis.
+    """
     labels = balance.bents[0].bound_labels if balance.bents else ()
     at = {lbl: i for i, lbl in enumerate(labels)}
-    return {(c.pair[0], c.pair[1], at.get(c.bound, 0)): c
-            for c in balance.checks if c.name == check_name}
+    rep = {f.key: f.members[0].name for f in (frames or [])}
+    out = {}
+    for c in balance.checks:
+        if c.name != check_name or c.direction != direction:
+            continue
+        a, b = rep.get(c.pair[0], c.pair[0]), rep.get(c.pair[1], c.pair[1])
+        out[(a, b, at.get(c.bound, 0))] = c
+    return out
 
 
 def _profile_fig(bents, value_of, ylabel, status):
@@ -918,35 +937,67 @@ if "summary" in st.session_state:
             st.info("**Seismic re-verification:** no silo was needed, so no "
                     "pier was re-analysed.")
 
+        direction = st.radio(
+            "Direction", list(DIRECTIONS), horizontal=True,
+            key="balance_direction",
+            format_func=str.capitalize,
+            help="Tributary mass differs by direction, and so do the frames: a "
+                 "bearing released longitudinally but shear-keyed joins the "
+                 "continuous frame transversely only. Everything below is for "
+                 "the selected direction; both are checked.")
+        frames = balance.frames.get(direction, [])
+        dir_checks = [c for c in balance.checks if c.direction == direction]
+
+        if frames:
+            st.markdown(
+                f"**Frames acting {direction}.** A frame is the set of bents "
+                f"that resist together, derived from `deck_link`. Its period "
+                f"comes from the frame (`K = Σkᵢ`, `M = Σmᵢ`, rigid deck), not "
+                f"from one bent. Balanced *stiffness* only applies inside a "
+                f"**continuous** frame; balanced *geometry* applies between "
+                f"adjacent frames everywhere.")
+            frame_rows = []
+            for f in frames:
+                row = {"frame": f.key, "bents": " + ".join(f.names),
+                       "continuous": "yes" if f.continuous else "—",
+                       "M_kip_s2_in": round(f.M(), 3)}
+                for i in range(f.n_bounds):
+                    row[f"K [{f.label(i)}]"] = round(f.K(i), 2)
+                    row[f"T [{f.label(i)}]"] = round(f.T(i), 3)
+                frame_rows.append(row)
+            st.dataframe(pd.DataFrame(frame_rows), width="stretch")
+
         if balance.bents:
             bent_rows = []
             for b in balance.bents:
                 row = {"pier": b.name, "frame": b.frame,
+                       "deck_link": b.deck_link,
                        "Hcol_ft": round(b.Hcol / 12, 1),
                        "silo_ft": round(b.silo / 12, 1),
                        "H_free_ft": round(b.H_free / 12, 1),
-                       "m_kip_s2_in": round(b.mass, 3)}
+                       "m_kip_s2_in": round(b.mass(direction), 3)}
                 for i in range(len(b.k)):
                     row[f"k [{b.label(i)}]"] = round(b.k[i], 2)
-                    row[f"T [{b.label(i)}]"] = round(b.T[i], 3)
+                    row[f"T [{b.label(i)}]"] = round(b.T(direction, i), 3)
                     row[f"κ [{b.label(i)}]"] = round(
-                        b.kappa(i, cr.mass_normalized), 3)
+                        b.kappa(direction, i, cr.mass_normalized), 3)
                 bent_rows.append(row)
             st.dataframe(pd.DataFrame(bent_rows), width="stretch")
 
-        if balance.checks:
+        if dir_checks:
             st.dataframe(pd.DataFrame([{
                 "check": c.name, "pair": f"{c.pair[0]}–{c.pair[1]}",
-                "bound": c.bound,
+                "frame": c.scope or "—", "bound": c.bound,
                 "ratio": None if np.isnan(c.ratio) else round(c.ratio, 3),
                 "limit": c.limit,
                 "status": "PASS" if c.passed else "FAIL",
                 "values": c.note,
-            } for c in balance.checks]), width="stretch")
+            } for c in dir_checks]), width="stretch")
 
             # --- along the bridge: each adjacent LINK drawn pass/fail ---
-            k_status = _bound_status(balance, STIFFNESS_CHECK)
-            t_status = _bound_status(balance, GEOMETRY_CHECK)
+            k_status = _bound_status(balance, STIFFNESS_CHECK, direction)
+            t_status = _bound_status(balance, GEOMETRY_CHECK, direction,
+                                     frames=frames)
             _silo_ft = {b.name: b.silo / 12.0 for b in balance.bents if b.silo > 0}
             _silo_txt = (
                 "  Silo depths are on the pier axis (filled marker = silo): "
@@ -955,35 +1006,46 @@ if "summary" in st.session_state:
                   f"{len(_silo_ft)} pier(s)."
             ) if _silo_ft else "  No silo was added."
             st.markdown(
-                f"**Along the bridge.** Markers are piers, one per fixity "
-                f"bound; the line between two piers is the adjacent-pair check "
-                f"itself — plain grey where it complies, dashed red with "
-                f"`✗ ratio` where it does not. Unlinked neighbours are in "
-                f"different frames." + _silo_txt)
+                f"**Along the bridge ({direction}).** Markers are piers, one "
+                f"per fixity bound. A line between two piers is a check — plain "
+                f"grey where it complies, dashed red with `✗ ratio` where it "
+                f"does not. On the left that is the balanced-stiffness rule "
+                f"inside a continuous frame (so unlinked piers are in different "
+                f"frames, where the rule does not apply); on the right it is "
+                f"the frame-period rule between neighbouring frames."
+                + _silo_txt)
             bk1, bk2 = st.columns(2)
             bk1.pyplot(_profile_fig(
                 balance.bents,
-                lambda b, i: b.kappa(i, cr.mass_normalized),
+                lambda b, i: b.kappa(direction, i, cr.mass_normalized),
                 f"κ = {cr.kappa_symbol}", k_status))
             bk2.pyplot(_profile_fig(
-                balance.bents, lambda b, i: b.T[i], "T (s)", t_status))
+                balance.bents, lambda b, i: b.T(direction, i), "T (s)",
+                t_status))
 
             # --- the ratios themselves against their limits ---
-            k_checks = [c for c in balance.checks if c.name == STIFFNESS_CHECK]
-            t_checks = [c for c in balance.checks if c.name == GEOMETRY_CHECK]
-            n_bad = sum(1 for c in balance.checks if not c.passed)
+            k_checks = [c for c in dir_checks
+                        if c.name in (STIFFNESS_CHECK, STIFFNESS_ANY_CHECK)]
+            t_checks = [c for c in dir_checks if c.name == GEOMETRY_CHECK]
+            n_bad = sum(1 for c in dir_checks if not c.passed)
             st.markdown(
-                f"**Every adjacent pair against its limit.** Bars left of the "
-                f"limit line fail"
-                + (f" — {n_bad} of {len(balance.checks)} here." if n_bad
+                f"**Every pair against its limit ({direction}).** Bars left of "
+                f"the limit line fail"
+                + (f" — {n_bad} of {len(dir_checks)} here." if n_bad
                    else " — none do here."))
             rb1, rb2 = st.columns(2)
             if k_checks:
-                rb1.pyplot(_ratio_fig(k_checks, cr.k_ratio_min,
-                                      "Balanced stiffness (SDC 7.1.2 / SGS 4.1.2)"))
+                rb1.pyplot(_ratio_fig(
+                    k_checks, cr.k_ratio_min,
+                    "Balanced stiffness, within a frame (SDC 7.1.2 / SGS 4.1.2)"))
+            else:
+                rb1.info("No balanced-stiffness check in this direction: every "
+                         "frame holds a single bent, so there is nothing to "
+                         "compare inside one.")
             if t_checks:
-                rb2.pyplot(_ratio_fig(t_checks, cr.T_ratio_min,
-                                      "Balanced frame geometry (SDC 7.1.3 / SGS 4.1.3)"))
+                rb2.pyplot(_ratio_fig(
+                    t_checks, cr.T_ratio_min,
+                    "Balanced frame geometry (SDC 7.1.3 / SGS 4.1.3)"))
 
         if balance.log:
             # open by default whenever the tool changed a design or failed —

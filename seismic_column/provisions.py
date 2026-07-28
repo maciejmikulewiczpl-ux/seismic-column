@@ -107,9 +107,13 @@ class CodeProvisions:
     # AASHTO SGS 3rd Ed. Eq. 4.1.2-3/-4 and Eq. 4.1.3-1.  Both codes land on the
     # same two numbers, so these carry defaults and only the refs differ.
     balance_k_ratio_adjacent: float = 0.75   # min(ki,kj)/max(ki,kj), adjacent bents
+    balance_k_ratio_any: float = 0.50        # ditto, ANY two bents in the frame
     balance_T_ratio: float = 0.70            # min(Ti,Tj)/max(Ti,Tj), adjacent frames
     ref_balanced_stiffness: str = ("Caltrans SDC 2.1 §7.1.2 Table 7.1.2-1 "
                                    "(adjacent bents: 0.75 ≤ (ki/mi)/(kj/mj) ≤ 1.33)")
+    ref_balanced_stiffness_any: str = ("Caltrans SDC 2.1 §7.1.2 Table 7.1.2-1 "
+                                       "(any two bents in a frame: "
+                                       "0.5 ≤ (ki/mi)/(kj/mj) ≤ 2.0)")
     ref_balanced_geometry: str = ("Caltrans SDC 2.1 §7.1.3 "
                                   "(adjacent frames: 0.7 ≤ Ti/Tj ≤ 1.43)")
     ref_balance_tuning: str = ("Caltrans SDC 2.1 C7.1.2 (adjust effective column "
@@ -204,6 +208,9 @@ AASHTO_SGS_3 = CodeProvisions(
     ref_balanced_stiffness="AASHTO SGS 3rd Ed. §4.1.2 Eq. 4.1.2-3 (constant width) "
                            "/ Eq. 4.1.2-4 (variable width): ki_e/kj_e ≥ 0.75, "
                            "adjacent bents",
+    ref_balanced_stiffness_any="AASHTO SGS 3rd Ed. §4.1.2 Eq. 4.1.2-1 (constant "
+                               "width) / Eq. 4.1.2-2 (variable width): "
+                               "ki_e/kj_e ≥ 0.50, any two bents in a frame",
     ref_balanced_geometry="AASHTO SGS 3rd Ed. §4.1.3 Eq. 4.1.3-1 "
                           "(adjacent frames: Ti/Tj ≥ 0.7)",
     ref_balance_tuning="AASHTO SGS 3rd Ed. §4.1.4 (adjust effective column "

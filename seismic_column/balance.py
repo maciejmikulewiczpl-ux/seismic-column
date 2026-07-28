@@ -1,62 +1,92 @@
-"""Balanced stiffness and balanced frame geometry between adjacent piers.
+"""Balanced stiffness and balanced frame geometry between adjacent frames.
 
-The columns in the batch table support **simply supported spans in series**, so
-adjacent piers interact even though each one is analysed as a stand-alone
-single-column bent.  Two code rules govern that interaction:
+A bridge is a run of **frames**, and the two code rules act at different levels:
 
 *Balanced stiffness* — Caltrans SDC 2.1 §7.1.2 Table 7.1.2-1, AASHTO SGS 3rd Ed.
-§4.1.2 Eq. 4.1.2-3/-4.  For **adjacent** bents::
+§4.1.2 — compares bents **inside one frame**::
 
-    min(kappa_i, kappa_j) / max(kappa_i, kappa_j) >= 0.75
+    adjacent bents in a frame   min(kappa_i, kappa_j)/max(...) >= 0.75
+    any two bents in a frame    min(kappa_i, kappa_j)/max(...) >= 0.50
 
-where ``kappa = k_e / m`` (the stiffness-to-mass ratio Caltrans always uses, and
-the AASHTO variable-width form Eq. 4.1.2-4) or ``kappa = k_e`` (the AASHTO
-constant-width form Eq. 4.1.2-3), selected by ``BalanceCriteria.mass_normalized``.
+with ``kappa = k_e/m`` (the stiffness-to-mass form Caltrans always uses, and the
+AASHTO variable-width form) or ``kappa = k_e`` (AASHTO constant width).  A frame
+holding a single bent has nothing to compare, so **no stiffness rule applies to a
+run of simply supported spans** — each of those is its own frame.
 
-*Balanced frame geometry* — Caltrans SDC 2.1 §7.1.3, AASHTO SGS 3rd Ed. §4.1.3::
+*Balanced frame geometry* — SDC §7.1.3, SGS §4.1.3 — compares **adjacent
+frames**::
 
     min(T_i, T_j) / max(T_i, T_j) >= 0.70
 
-Writing both as ``min/max`` makes Caltrans' two-sided limits (0.75…1.33 and
-0.7…1.43) and AASHTO's one-sided ones the same test, and makes the check
-independent of which pier is called *i*.
+and applies everywhere, simply supported or continuous.
 
-Scope, as specified for this project: **adjacent pairs only**.  The any-two-bents
-0.50 rule (SDC Eq. 7.1.2-1 / SGS Eq. 4.1.2-1) is not applied — with an expansion
-joint at every pier, each pier is arguably its own frame, and the piers in series
-are treated as one frame of bents purely so the adjacent-bent rule bites.
+Writing both as ``min/max`` makes Caltrans' two-sided limits (0.75…1.33,
+0.5…2.0, 0.7…1.43) and AASHTO's one-sided ones the same test, and makes each
+check independent of which member is called *i*.
 
-Note the identity ``T = 2*pi*sqrt(m/k)``, so ``(T_i/T_j)^2 = kappa_j/kappa_i``:
-under mass normalisation a stiffness ratio of 0.75 gives a period ratio of
-``sqrt(0.75) = 0.866 >= 0.70``, i.e. the balanced-stiffness rule *implies* the
-balanced-geometry rule.  Both are still evaluated — they are separately named
-clauses, and they decouple under the constant-width (non-normalised) form.
+Direction matters
+-----------------
+Everything above is evaluated **longitudinally and transversely**, because the
+tributary mass a bent restrains differs by direction and so, therefore, do the
+periods.  Which bents form a frame also differs by direction: a bearing that is
+released longitudinally but shear-keyed transversely joins the frame one way and
+not the other.  :func:`frames_for` derives both layouts from ``deck_link``.
+
+A frame's period is the frame's, not a bent's::
+
+    K_frame = sum of k over the members that resist in this direction
+    M_frame = sum of their tributary mass
+    T_frame = 2*pi*sqrt(M_frame / K_frame)
+
+which is the standard rigid-deck, stand-alone-frame ESA idealisation.  A
+single-bent frame reduces to exactly the bent's own SDOF period.
+
+Member stiffness is the **fixed-free** two-segment cantilever already computed
+for the seismic run — correct transversely, and for every simply supported bent.
+An integral bent is a fixed moment connection and is therefore fixed-fixed
+*longitudinally* (SDC C7.1.2 gives 12EcIeff/L^3 against 3EcIeff/L^3), which this
+module does not yet model; see :data:`END_CONDITION_NOTE`.
 
 The tuning lever is the **column silo** (isolation casing), which lengthens the
 free column and so softens a stiff pier — Caltrans C7.1.2 / SGS §4.1.4.
 :func:`required_silo` sizes it from the elastic two-segment cantilever, which
 costs nothing (no moment-curvature, no p-y), so the batch orchestration can
-predict a silo depth before paying for a full re-analysis at that depth.
+predict a depth before paying for a full re-analysis at that depth.
 """
 from __future__ import annotations
 
+import itertools
 import math
 from dataclasses import dataclass, field, replace
 
 from .geometry import Geometry
+from .io_schema import DIRECTIONS, LONGITUDINAL, TRANSVERSE, in_frame
 
 STIFFNESS_CHECK = "Balanced stiffness (adjacent)"
+STIFFNESS_ANY_CHECK = "Balanced stiffness (any two)"
 GEOMETRY_CHECK = "Balanced frame geometry (adjacent)"
+
+# Stated wherever a frame period is reported, because it is an approximation
+# that is NOT conservative in a known direction.
+END_CONDITION_NOTE = (
+    "Member stiffness is the fixed-free cantilever (SDC C7.1.2-1, 3EcIeff/L³). "
+    "That is right transversely and for every simply supported bent, but an "
+    "integral bent is a fixed moment connection and so is fixed-fixed "
+    "longitudinally (C7.1.2-2, 12EcIeff/L³). Longitudinal K_frame is therefore "
+    "understated and T_long overstated for a continuous frame."
+)
 
 
 @dataclass(frozen=True)
 class BalanceCriteria:
     """The limits and clause references a balance run is judged against."""
 
-    k_ratio_min: float = 0.75
-    T_ratio_min: float = 0.70
+    k_ratio_min: float = 0.75          # adjacent bents within a frame
+    k_ratio_any: float = 0.50          # any two bents within a frame
+    T_ratio_min: float = 0.70          # adjacent frames
     mass_normalized: bool = True
     ref_stiffness: str = ""
+    ref_stiffness_any: str = ""
     ref_geometry: str = ""
 
     @property
@@ -66,28 +96,60 @@ class BalanceCriteria:
 
 @dataclass
 class BentStiffness:
-    """One pier's balance-relevant state, evaluated at every fixity bound."""
+    """One pier's balance-relevant state, evaluated at every fixity bound.
+
+    ``k`` is direction-independent — a circular column on a circular shaft is
+    axisymmetric — so only the mass, and hence the period and ``kappa``, differ
+    between longitudinal and transverse.
+    """
 
     name: str
     frame: str
-    order: int                       # position along the frame (table row order)
+    order: int                       # position along the bridge (table row order)
     Hcol: float                      # entered clear height, in
     silo: float                      # column silo depth, in
-    mass: float                      # tributary seismic mass, kip*s^2/in
     k: tuple[float, ...]             # effective lateral stiffness per bound, kip/in
-    T: tuple[float, ...]             # effective period per bound, s
+    mass_long: float = float("nan")  # tributary mass restrained longitudinally
+    mass_trans: float = float("nan")  # ... and transversely, kip*s^2/in
+    deck_link: str = "integral"
     bound_labels: tuple[str, ...] = ()
 
     @property
     def H_free(self) -> float:
         return self.Hcol + self.silo
 
-    def kappa(self, bound: int, mass_normalized: bool = True) -> float:
+    def mass(self, direction: str) -> float:
+        """Tributary mass restrained in ``direction``, kip*s^2/in."""
+        return self.mass_long if direction == LONGITUDINAL else self.mass_trans
+
+    def participates(self, direction: str) -> bool:
+        """Does this bent resist the deck in ``direction``?
+
+        ``integral`` is monolithic and resists both ways; ``bearing`` is released
+        longitudinally but shear-keyed, so it resists transversely only; ``free``
+        resists neither.
+        """
+        if self.deck_link == "free":
+            return False
+        if self.deck_link == "bearing":
+            return direction == TRANSVERSE
+        return True                                   # integral
+
+    def T(self, direction: str, bound: int) -> float:
+        """Effective SDOF period of this bent alone in ``direction``, s."""
+        k, m = self.k[bound], self.mass(direction)
+        if not (math.isfinite(k) and math.isfinite(m)) or k <= 0 or m <= 0:
+            return float("nan")
+        return 2.0 * math.pi * math.sqrt(m / k)
+
+    def kappa(self, direction: str, bound: int,
+              mass_normalized: bool = True) -> float:
         """Stiffness (or stiffness-to-mass) ratio parameter at ``bound``."""
         k = self.k[bound]
         if not mass_normalized:
             return k
-        return k / self.mass if self.mass > 0 else float("nan")
+        m = self.mass(direction)
+        return k / m if m > 0 else float("nan")
 
     def label(self, bound: int) -> str:
         if bound < len(self.bound_labels) and self.bound_labels[bound]:
@@ -96,8 +158,49 @@ class BentStiffness:
 
 
 @dataclass
+class Frame:
+    """The bents that act together in one direction, and their frame period."""
+
+    key: str
+    direction: str
+    members: list[BentStiffness]
+    order: int                       # position along the bridge (lowest member)
+
+    @property
+    def continuous(self) -> bool:
+        """More than one bent acts together, so the stiffness rules apply."""
+        return len(self.members) > 1
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        return tuple(b.name for b in self.members)
+
+    @property
+    def n_bounds(self) -> int:
+        return min((len(b.k) for b in self.members), default=0)
+
+    def K(self, bound: int) -> float:
+        """Frame lateral stiffness, kip/in — rigid deck, so the members add."""
+        return sum(b.k[bound] for b in self.members)
+
+    def M(self) -> float:
+        """Frame tributary mass in this direction, kip*s^2/in."""
+        return sum(b.mass(self.direction) for b in self.members)
+
+    def T(self, bound: int) -> float:
+        """Frame period, s.  Reduces to the bent's own period when alone."""
+        K, M = self.K(bound), self.M()
+        if not (math.isfinite(K) and math.isfinite(M)) or K <= 0 or M <= 0:
+            return float("nan")
+        return 2.0 * math.pi * math.sqrt(M / K)
+
+    def label(self, bound: int) -> str:
+        return self.members[0].label(bound) if self.members else f"bound {bound+1}"
+
+
+@dataclass
 class BalanceCheck:
-    """One code check on one adjacent pair at one fixity bound."""
+    """One code check on one pair, in one direction, at one fixity bound."""
 
     name: str
     pair: tuple[str, str]
@@ -105,12 +208,15 @@ class BalanceCheck:
     ratio: float
     limit: float
     passed: bool
+    direction: str = ""
+    scope: str = ""                  # frame key the check belongs to
     ref: str = ""
     note: str = ""
 
     @property
     def label(self) -> str:
-        return f"{self.name}: {self.pair[0]}-{self.pair[1]} [{self.bound}]"
+        d = f", {self.direction[:5]}." if self.direction else ""
+        return f"{self.name}: {self.pair[0]}-{self.pair[1]} [{self.bound}{d}]"
 
 
 @dataclass
@@ -120,6 +226,7 @@ class BalanceResult:
     bents: list[BentStiffness] = field(default_factory=list)
     checks: list[BalanceCheck] = field(default_factory=list)
     criteria: BalanceCriteria = field(default_factory=BalanceCriteria)
+    frames: dict[str, list[Frame]] = field(default_factory=dict)
     log: list[str] = field(default_factory=list)
     converged: bool = True
 
@@ -131,28 +238,46 @@ class BalanceResult:
     def failed(self) -> list[BalanceCheck]:
         return [c for c in self.checks if not c.passed]
 
-    def worst_ratio(self, name: str, check_name: str) -> float | None:
-        """Worst (lowest) ratio of ``check_name`` involving pier ``name``."""
+    def worst_ratio(self, name: str, check_name: str,
+                    direction: str | None = None) -> float | None:
+        """Worst (lowest) ratio of ``check_name`` involving ``name``.
+
+        ``name`` matches either a pier or, for the geometry rule, a frame key.
+        """
         vals = [c.ratio for c in self.checks
                 if c.name == check_name and name in c.pair
+                and (direction is None or c.direction == direction)
                 and math.isfinite(c.ratio)]
         return min(vals) if vals else None
 
+    def frames_of(self, pier: str) -> set[str]:
+        """Frame keys the pier belongs to, across both directions."""
+        return {f.key for frames in self.frames.values() for f in frames
+                if pier in f.names}
+
     def pier_passed(self, name: str) -> bool:
-        """True if every check involving pier ``name`` passed."""
-        return all(c.passed for c in self.checks if name in c.pair)
+        """True if every check touching this pier — or its frame — passed."""
+        keys = self.frames_of(name) | {name}
+        return all(c.passed for c in self.checks if keys & set(c.pair))
+
+    def touches(self, name: str) -> bool:
+        """Is this pier involved in any check at all?"""
+        keys = self.frames_of(name) | {name}
+        return any(keys & set(c.pair) for c in self.checks)
 
 
 # ---------------------------------------------------------------------------
-# Building bents from batch results
+# Building bents and frames from batch results
 # ---------------------------------------------------------------------------
 def bent_stiffness(name: str, frame: str, order: int, assessment,
-                   Hcol: float, silo: float) -> BentStiffness:
-    """Collect a row's stiffnesses/periods straight off its assessment bounds.
+                   Hcol: float, silo: float, mass_long: float,
+                   mass_trans: float, deck_link: str = "integral"
+                   ) -> BentStiffness:
+    """Collect a row's stiffnesses straight off its assessment bounds.
 
     No new mechanics: ``k`` is the effective (cracked, ``EI = Mp/phi_y``) lateral
     stiffness of the two-segment equivalent cantilever that already drives the
-    displacement demand, and ``T`` the effective period that goes with it.
+    displacement demand.  Periods are derived per direction from the two masses.
     """
     bounds = assessment.bounds
     labels = [b.soil_label or f"{b.multiplier:.2g}·D_shaft" for b in bounds]
@@ -168,23 +293,64 @@ def bent_stiffness(name: str, frame: str, order: int, assessment,
         keep.append(i)
     return BentStiffness(
         name=name, frame=frame, order=order, Hcol=Hcol, silo=silo,
-        mass=bounds[0].demand.mass if bounds else float("nan"),
         k=tuple(bounds[i].stiffness for i in keep),
-        T=tuple(bounds[i].demand.period for i in keep),
+        mass_long=mass_long, mass_trans=mass_trans, deck_link=deck_link,
         bound_labels=tuple(labels[i] for i in keep),
     )
 
 
-def adjacent_pairs(bents: list[BentStiffness]
-                   ) -> list[tuple[BentStiffness, BentStiffness]]:
-    """Consecutive pairs within each frame, in table row order.
+def frames_for(bents: list[BentStiffness], direction: str) -> list[Frame]:
+    """The frames acting in ``direction``, ordered along the bridge.
 
-    Bents are grouped by ``frame`` (order of first appearance preserved) and
-    paired with their immediate neighbour.  A frame holding a single bent yields
-    no pairs.  Callers exclude opted-out piers before calling.
+    Within a ``frame`` id, the bents that resist in this direction act together.
+    A bent that does **not** resist here still holds whatever tributary mass it
+    does restrain, so it splits off as its own single-bent frame — which is how a
+    longitudinally-released bearing behaves: out of the continuous frame one way,
+    inside it the other::
+
+        LONGITUDINAL  A6 | A7 | [A8 A9 A10] | A11 | A12      (A7/A11 released)
+        TRANSVERSE    A6 | [A7 A8 A9 A10 A11] | A12          (shear keys engage)
+
+    A bent with no mass in this direction drops out entirely, as does one opted
+    out of the checks via a blank ``frame``.
     """
     groups: dict[str, list[BentStiffness]] = {}
     for b in sorted(bents, key=lambda b: b.order):
+        if not in_frame(b.frame):
+            continue
+        groups.setdefault(b.frame, []).append(b)
+
+    frames: list[Frame] = []
+    for key, members in groups.items():
+        holds = [b for b in members if b.mass(direction) > 0]
+        acting = [b for b in holds if b.participates(direction)]
+        # A bearing released in THIS direction still holds whatever span it is
+        # fixed to, so it stands alone.  A `free` bent resists nothing at all
+        # and leaves the model entirely.
+        standalone = [b for b in holds
+                      if not b.participates(direction) and b.deck_link != "free"]
+        if acting:
+            frames.append(Frame(key=key, direction=direction, members=acting,
+                                order=min(b.order for b in acting)))
+        for b in standalone:
+            frames.append(Frame(key=f"{key}·{b.name}", direction=direction,
+                                members=[b], order=b.order))
+    frames.sort(key=lambda f: f.order)
+    return frames
+
+
+def adjacent_pairs(bents: list[BentStiffness]
+                   ) -> list[tuple[BentStiffness, BentStiffness]]:
+    """Consecutive bents within each frame id, in table row order.
+
+    Retained for the silo planner and the mass-window diagnostic, which reason
+    about bents rather than frames.  A frame holding a single bent yields no
+    pairs.
+    """
+    groups: dict[str, list[BentStiffness]] = {}
+    for b in sorted(bents, key=lambda b: b.order):
+        if not in_frame(b.frame):
+            continue
         groups.setdefault(b.frame, []).append(b)
     pairs = []
     for members in groups.values():
@@ -204,39 +370,61 @@ def _ratio(a: float, b: float) -> float:
 
 def balance_checks(bents: list[BentStiffness],
                    criteria: BalanceCriteria) -> list[BalanceCheck]:
-    """Every adjacent-pair balance check, at every fixity bound.
+    """Every balance check, in both directions, at every fixity bound.
 
     Bounds are compared **like for like** (stiff-vs-stiff, soft-vs-soft) so the
-    same modelling assumption is applied to both piers of a pair, and every bound
+    same modelling assumption is applied to both sides of a pair, and every bound
     must comply.
+
+    The any-two rule is reported for **non-adjacent** pairs only: an adjacent
+    pair is also "any two", but its 0.75 limit is stricter than 0.50, so the
+    looser check can never govern there and printing it twice is noise.
     """
     checks: list[BalanceCheck] = []
-    for bi, bj in adjacent_pairs(bents):
-        n_bounds = min(len(bi.k), len(bj.k))
-        for b in range(n_bounds):
-            label = bi.label(b)
-            ki = bi.kappa(b, criteria.mass_normalized)
-            kj = bj.kappa(b, criteria.mass_normalized)
-            r = _ratio(ki, kj)
-            bad = math.isnan(r)
-            checks.append(BalanceCheck(
-                name=STIFFNESS_CHECK, pair=(bi.name, bj.name), bound=label,
-                ratio=r, limit=criteria.k_ratio_min,
-                passed=(not bad) and r >= criteria.k_ratio_min,
-                ref=criteria.ref_stiffness,
-                note=("stiffness unavailable (unstable p-y solve?)" if bad else
-                      f"{criteria.kappa_symbol} = {ki:.4g} vs {kj:.4g}"),
-            ))
-            rT = _ratio(bi.T[b], bj.T[b])
-            badT = math.isnan(rT)
-            checks.append(BalanceCheck(
-                name=GEOMETRY_CHECK, pair=(bi.name, bj.name), bound=label,
-                ratio=rT, limit=criteria.T_ratio_min,
-                passed=(not badT) and rT >= criteria.T_ratio_min,
-                ref=criteria.ref_geometry,
-                note=("period unavailable" if badT else
-                      f"T = {bi.T[b]:.3f} s vs {bj.T[b]:.3f} s"),
-            ))
+    for direction in DIRECTIONS:
+        frames = frames_for(bents, direction)
+
+        # --- stiffness: inside a continuous frame only ---
+        for f in frames:
+            if not f.continuous:
+                continue
+            adjacent = {(a.name, b.name) for a, b in zip(f.members, f.members[1:])}
+            for bound in range(f.n_bounds):
+                label = f.label(bound)
+                for bi, bj in itertools.combinations(f.members, 2):
+                    near = (bi.name, bj.name) in adjacent
+                    ki = bi.kappa(direction, bound, criteria.mass_normalized)
+                    kj = bj.kappa(direction, bound, criteria.mass_normalized)
+                    r = _ratio(ki, kj)
+                    bad = math.isnan(r)
+                    limit = criteria.k_ratio_min if near else criteria.k_ratio_any
+                    checks.append(BalanceCheck(
+                        name=STIFFNESS_CHECK if near else STIFFNESS_ANY_CHECK,
+                        pair=(bi.name, bj.name), bound=label,
+                        ratio=r, limit=limit,
+                        passed=(not bad) and r >= limit,
+                        direction=direction, scope=f.key,
+                        ref=(criteria.ref_stiffness if near
+                             else criteria.ref_stiffness_any),
+                        note=("stiffness unavailable (unstable p-y solve?)" if bad
+                              else f"{criteria.kappa_symbol} = {ki:.4g} vs {kj:.4g}"),
+                    ))
+
+        # --- geometry: between adjacent frames, everywhere ---
+        for fi, fj in zip(frames, frames[1:]):
+            for bound in range(min(fi.n_bounds, fj.n_bounds)):
+                Ti, Tj = fi.T(bound), fj.T(bound)
+                r = _ratio(Ti, Tj)
+                bad = math.isnan(r)
+                checks.append(BalanceCheck(
+                    name=GEOMETRY_CHECK, pair=(fi.key, fj.key),
+                    bound=fi.label(bound), ratio=r, limit=criteria.T_ratio_min,
+                    passed=(not bad) and r >= criteria.T_ratio_min,
+                    direction=direction, scope="",
+                    ref=criteria.ref_geometry,
+                    note=("period unavailable" if bad else
+                          f"T = {Ti:.3f} s vs {Tj:.3f} s"),
+                ))
     return checks
 
 
@@ -287,44 +475,12 @@ def required_silo(geometry: Geometry, EI_col: float, EI_shaft: float,
     return hi
 
 
-def mass_ratio_window(criteria: BalanceCriteria) -> tuple[float, float]:
-    """Adjacent tributary-mass ratios for which BOTH rules can hold at once.
-
-    Only meaningful when mass normalisation is OFF.  With ``kappa = k`` the two
-    rules constrain the same quantity ``x = k_i/k_j`` from opposite directions::
-
-        stiffness :  L_k <= x <= 1/L_k
-        period    :  T_i/T_j = sqrt(mu/x)  with  mu = m_i/m_j
-                     L_T <= sqrt(mu/x) <= 1/L_T   ->   mu*L_T^2 <= x <= mu/L_T^2
-
-    Those two windows overlap only while ``L_k*L_T^2 <= mu <= 1/(L_k*L_T^2)`` —
-    at the code limits, a factor of 2.72.  Outside it the pair cannot satisfy
-    both clauses at ANY stiffness, so no silo (indeed no column change of any
-    kind) will fix it: the tributary masses themselves have to move, or mass
-    normalisation has to be switched on.
-
-    With normalisation ON this can never bite — the kappa rule then implies the
-    period rule — so the window is unbounded.
-    """
-    if criteria.mass_normalized:
-        return (0.0, float("inf"))
-    f = criteria.k_ratio_min * criteria.T_ratio_min ** 2
-    return (f, 1.0 / f)
-
-
-def joint_feasible(bi: BentStiffness, bj: BentStiffness,
-                   criteria: BalanceCriteria) -> tuple[bool, float, tuple[float, float]]:
-    """``(feasible, mass_ratio, allowed_k_ratio_window)`` for one adjacent pair."""
-    lo, hi = mass_ratio_window(criteria)
-    if bj.mass <= 0 or bi.mass <= 0:
-        return True, float("nan"), (criteria.k_ratio_min, 1.0 / criteria.k_ratio_min)
-    mu = bi.mass / bj.mass
-    if criteria.mass_normalized:
-        return True, mu, (criteria.k_ratio_min, 1.0 / criteria.k_ratio_min)
-    t2 = criteria.T_ratio_min ** 2
-    x_lo = max(criteria.k_ratio_min, mu * t2)
-    x_hi = min(1.0 / criteria.k_ratio_min, mu / t2)
-    return (lo <= mu <= hi), mu, (x_lo, x_hi)
+# NOTE: a "joint feasibility" diagnostic used to live here.  It solved the case
+# where the stiffness rule and the period rule bound the SAME k ratio from
+# opposite sides, which could make a pair unsatisfiable at any stiffness.  That
+# clash cannot arise any more: the stiffness rule acts on bents INSIDE a frame
+# and the period rule on adjacent FRAMES, so the two never constrain the same
+# pair.  It was removed rather than left as a check that can never fire.
 
 
 # ---------------------------------------------------------------------------
@@ -366,13 +522,17 @@ def silo_states(floor: float, cap: float, step: float) -> tuple[float, ...]:
 
 
 def pair_ok(ki: float, kj: float, mi: float, mj: float,
-            criteria: BalanceCriteria) -> bool:
-    """Do two adjacent piers satisfy BOTH balance rules at this bound?"""
+            criteria: BalanceCriteria, k_limit: float | None = None) -> bool:
+    """Do two piers satisfy BOTH balance rules at this bound?
+
+    ``k_limit`` defaults to the adjacent-bent limit; pass ``k_ratio_any`` for a
+    non-adjacent pair inside a frame.  The period limit is the same either way.
+    """
     if not (math.isfinite(ki) and math.isfinite(kj)) or ki <= 0 or kj <= 0:
         return False
     ai = ki / mi if criteria.mass_normalized else ki
     aj = kj / mj if criteria.mass_normalized else kj
-    if _ratio(ai, aj) < criteria.k_ratio_min:
+    if _ratio(ai, aj) < (criteria.k_ratio_min if k_limit is None else k_limit):
         return False
     Ti = math.sqrt(mi / ki)                 # 2*pi cancels in the ratio
     Tj = math.sqrt(mj / kj)
@@ -380,37 +540,46 @@ def pair_ok(ki: float, kj: float, mi: float, mj: float,
 
 
 def dp_min_silo(bents: list[BentStiffness], states: dict[str, tuple[float, ...]],
-                k_of, m_of, criteria: BalanceCriteria) -> SiloPlan:
-    """Minimum-total-silo assignment on the buildable grid — exact, per frame.
+                feasible, chain: list[list[BentStiffness]] | None = None
+                ) -> SiloPlan:
+    """Minimum-total-silo assignment on the buildable grid — exact, per chain.
 
-    Silo depths are discrete (whole ``silo_step_ft`` increments up to the cap),
-    and the balance rules only ever couple *adjacent* piers.  A frame is
-    therefore a chain, and the cheapest feasible assignment over a chain is a
-    textbook dynamic program::
+    Silo depths are discrete (whole ``silo_step_ft`` increments up to the cap).
+    When the governing rules only couple *neighbours*, each run of bents is a
+    chain and the cheapest feasible assignment over a chain is a textbook
+    dynamic program::
 
         dp[i][s] = s + min over s' allowed by the pair (i-1, i) of dp[i-1][s']
 
     That is the true optimum on the grid, not a relaxation of it — unlike the
     pairwise repair, which fixes one failing pair at a time and pays for the
-    cascade that each local fix sets off in its neighbour.
+    cascade each local fix sets off in its neighbour.
 
-    ``k_of(bent, silo, bound) -> float`` and ``m_of(bent, silo) -> float`` supply
-    the predicted stiffness and mass at a trial depth; the caller is responsible
-    for calibrating them against a real analysis and iterating.
+    ``feasible(bi, si, bj, sj) -> bool`` decides whether neighbouring bents may
+    sit at those two depths; the caller owns which rules that covers and is
+    responsible for calibrating its stiffness predictions against a real
+    analysis and iterating.  ``chain`` gives the runs to solve (default: group by
+    ``frame``); a caller whose rules couple frames rather than bents passes the
+    bridge-order run instead.
 
-    Cost is O(n · S² · bounds) — a few hundred thousand operations at worst.
-    Returns ``feasible=False`` with the offending pair named when some adjacent
-    pair admits no combination at all.
+    Cost is O(n · S²).  Returns ``feasible=False`` with the offending pair named
+    when some neighbouring pair admits no combination at all.
+
+    **The caller must not use this when the rules are not neighbour-only** — the
+    any-two-bents rule makes a continuous frame all-pairs, which this cannot
+    represent.
     """
     silos: dict[str, float] = {}
     notes: list[str] = []
     ok = True
 
-    groups: dict[str, list[BentStiffness]] = {}
-    for b in sorted(bents, key=lambda b: b.order):
-        groups.setdefault(b.frame, []).append(b)
+    if chain is None:
+        groups: dict[str, list[BentStiffness]] = {}
+        for b in sorted(bents, key=lambda b: b.order):
+            groups.setdefault(b.frame, []).append(b)
+        chain = list(groups.values())
 
-    for members in groups.values():
+    for members in chain:
         if len(members) == 1:                 # nothing to balance against
             silos[members[0].name] = states[members[0].name][0]
             continue
@@ -421,16 +590,13 @@ def dp_min_silo(bents: list[BentStiffness], states: dict[str, tuple[float, ...]]
         back: list[list[int]] = []
         for i in range(1, n):
             bi, bj = members[i - 1], members[i]
-            n_bounds = min(len(bi.k), len(bj.k))
             row, bp = [], []
             for sj in st[i]:
                 best, arg = math.inf, -1
                 for a, si in enumerate(st[i - 1]):
                     if dp[a][0] == math.inf:
                         continue
-                    if all(pair_ok(k_of(bi, si, b), k_of(bj, sj, b),
-                                   m_of(bi, si), m_of(bj, sj), criteria)
-                           for b in range(n_bounds)):
+                    if feasible(bi, si, bj, sj):
                         if dp[a][0] < best:
                             best, arg = dp[a][0], a
                 row.append((best + sj if best < math.inf else math.inf, arg))

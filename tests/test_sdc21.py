@@ -202,6 +202,7 @@ def test_oversize_validation_by_code():
 
 # ---------------------------------------------------------------------------
 # End-to-end smoke test: every code / optimise combination must run clean
+@pytest.mark.slow
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("code", ["SDC 2.1", "AASHTO SGS 3rd Ed."])
 @pytest.mark.parametrize("optimize", [False, True])

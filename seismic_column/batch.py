@@ -14,19 +14,21 @@ Runs in up to three stages:
 """
 from __future__ import annotations
 
+import itertools
 import math
 from dataclasses import dataclass
 
 import pandas as pd
 
 from . import G_IN_S2
-from .balance import (GEOMETRY_CHECK, STIFFNESS_CHECK, BalanceCriteria,
-                      BalanceResult, BentStiffness, adjacent_pairs,
-                      balance_checks, bent_stiffness, dedupe, dp_min_silo,
-                      joint_feasible, quantise_silo, required_silo,
-                      silo_states, stiffness_at_silo)
+from .balance import (GEOMETRY_CHECK, STIFFNESS_ANY_CHECK, STIFFNESS_CHECK,
+                      BalanceCriteria, BalanceResult, BentStiffness,
+                      adjacent_pairs, balance_checks, bent_stiffness, dedupe,
+                      dp_min_silo, frames_for, quantise_silo,
+                      required_silo, silo_states, stiffness_at_silo)
 from .geometry import Geometry
-from .io_schema import GlobalConfig, build_soil_profile, in_frame, validate
+from .io_schema import (DIRECTIONS, LONGITUDINAL, TRANSVERSE, GlobalConfig,
+                         build_soil_profile, in_frame, validate)
 from .optimizer import ColumnDesign, OptimizeResult, OptimizeSpec, optimize_column
 from .provisions import get_provisions
 from .sdc_capacity import ColumnAssessment, column_self_weight, evaluate_column
@@ -43,6 +45,8 @@ class RowResult:
     log: list[str]
     frame: str = ""
     silo: float = 0.0          # column silo depth actually analysed, in
+    deck_link: str = "integral"   # integral | bearing | free
+    weight_trans: float = 0.0     # entered TRANSVERSE tributary weight, kip
 
 
 @dataclass
@@ -108,6 +112,8 @@ def run_row(row: pd.Series, cfg: GlobalConfig, on_candidate=None,
     """
     geometry, column, shaft, mults = _row_to_inputs(row, cfg, silo=silo)
     frame = str(row.get("frame", "") or "")
+    deck_link = str(row.get("deck_link", "integral") or "integral")
+    w_trans = float(row.get("weight_trans_kip", row["weight_long_kip"]))
     spectrum = cfg.design_spectrum.build()
     lle_spectrum = cfg.lle_spectrum.build() if cfg.lle_spectrum else None
     provisions = get_provisions(cfg.code)
@@ -118,7 +124,7 @@ def run_row(row: pd.Series, cfg: GlobalConfig, on_candidate=None,
     rho_l_max = min(cfg.rho_l_max, provisions.rho_l_max)
     mu_d_limit = min(cfg.mu_d_limit, provisions.mu_d_limit_single)
     axial = float(row["axial_kip"])
-    weight = float(row["weight_kip"])
+    weight = float(row["weight_long_kip"])   # seismic suite: unchanged basis
     name = str(row["name"])
 
     # soil-structure interaction (point of fixity from p-y strata)
@@ -147,7 +153,8 @@ def run_row(row: pd.Series, cfg: GlobalConfig, on_candidate=None,
             provisions=provisions, on_candidate=on_candidate, **soil_kw,
         )
         return RowResult(name, res.design, res.shaft, res.assessment, res.feasible,
-                         True, res.log, frame=frame, silo=geometry.silo)
+                         True, res.log, frame=frame, silo=geometry.silo,
+                         deck_link=deck_link, weight_trans=w_trans)
 
     assessment = evaluate_column(
         column.section(), shaft.section(), geometry, spectrum, axial, weight,
@@ -161,7 +168,8 @@ def run_row(row: pd.Series, cfg: GlobalConfig, on_candidate=None,
         provisions=provisions, **soil_kw,
     )
     return RowResult(name, column, shaft, assessment, assessment.passed, False, [],
-                     frame=frame, silo=geometry.silo)
+                     frame=frame, silo=geometry.silo,
+                     deck_link=deck_link, weight_trans=w_trans)
 
 
 def _criteria(cfg: GlobalConfig) -> BalanceCriteria:
@@ -169,22 +177,37 @@ def _criteria(cfg: GlobalConfig) -> BalanceCriteria:
     prov = get_provisions(cfg.code)
     return BalanceCriteria(
         k_ratio_min=max(cfg.balance_k_ratio_min, prov.balance_k_ratio_adjacent),
+        k_ratio_any=max(cfg.balance_k_ratio_any, prov.balance_k_ratio_any),
         T_ratio_min=max(cfg.balance_T_ratio_min, prov.balance_T_ratio),
         mass_normalized=cfg.balance_mass_normalized,
         ref_stiffness=prov.ref_balanced_stiffness,
+        ref_stiffness_any=prov.ref_balanced_stiffness_any,
         ref_geometry=prov.ref_balanced_geometry,
     )
 
 
-def _build_bents(results: list[RowResult], order: dict[str, int]
-                 ) -> list[BentStiffness]:
-    """Bents that take part in the checks, in table row order."""
-    return [
-        bent_stiffness(rr.name, rr.frame, order[rr.name], rr.assessment,
-                       Hcol=rr.assessment.Hcol_entered, silo=rr.silo)
-        for rr in results
-        if in_frame(rr.frame) and rr.assessment.bounds
-    ]
+def _build_bents(results: list[RowResult], order: dict[str, int],
+                 cfg: GlobalConfig) -> list[BentStiffness]:
+    """Bents that take part in the checks, in table row order.
+
+    The longitudinal mass is the one the seismic run already used (entered
+    weight plus the participating column self-weight).  The transverse mass is
+    the entered transverse weight plus the SAME self-weight participation, so
+    the two differ only by what the deck actually delivers to the bent.
+    """
+    out: list[BentStiffness] = []
+    for rr in results:
+        if not (in_frame(rr.frame) and rr.assessment.bounds):
+            continue
+        a = rr.assessment
+        m_long = a.bounds[0].demand.mass
+        m_trans = (rr.weight_trans
+                   + cfg.self_weight_mass_factor * a.W_self) / G_IN_S2
+        out.append(bent_stiffness(
+            rr.name, rr.frame, order[rr.name], a,
+            Hcol=a.Hcol_entered, silo=rr.silo,
+            mass_long=m_long, mass_trans=m_trans, deck_link=rr.deck_link))
+    return out
 
 
 def run_batch(df: pd.DataFrame, cfg: GlobalConfig,
@@ -266,62 +289,71 @@ def run_batch_balanced(df: pd.DataFrame, cfg: GlobalConfig,
     return BatchOutcome(summary=summary, results=results, balance=balance)
 
 
+def _silo_ctx(bents: list[BentStiffness], results: dict[str, RowResult],
+              cfg: GlobalConfig, silos: dict[str, float]):
+    """Predicted stiffness/mass at trial silo depths, calibrated to the real run.
+
+    The raw elastic cantilever over-predicts how much a silo softens a pier: in
+    soil mode lengthening the column also re-derives the point of fixity from the
+    p-y solve, which claws some stiffness back.  So each pier's prediction is
+    scaled to reproduce the stiffness actually measured at its current depth.
+    Mass grows slightly with the silo too (more column self-weight participating),
+    which lowers kappa and raises T — ignoring it would make the predictor
+    optimistic.
+    """
+    corr: dict[str, float] = {}
+    for b in bents:
+        rr = results[b.name]
+        ke = stiffness_at_silo(Geometry(Hcol=b.Hcol, D_shaft=rr.shaft.D),
+                               rr.assessment.EI_col, rr.assessment.EI_shaft,
+                               rr.assessment.bounds[0].multiplier, b.silo)
+        corr[b.name] = (b.k[0] / ke) if ke > 0 else 1.0
+
+    def k_at(b: BentStiffness, silo: float, bound: int) -> float:
+        rr = results[b.name]
+        return corr[b.name] * stiffness_at_silo(
+            Geometry(Hcol=b.Hcol, D_shaft=rr.shaft.D),
+            rr.assessment.EI_col, rr.assessment.EI_shaft,
+            rr.assessment.bounds[bound].multiplier, silo)
+
+    def m_at(b: BentStiffness, silo: float, direction: str) -> float:
+        rr = results[b.name]
+        dW = column_self_weight(rr.design.section().Ag, silo - b.silo,
+                                cfg.concrete_unit_weight)
+        return b.mass(direction) + cfg.self_weight_mass_factor * dW / G_IN_S2
+
+    return k_at, m_at
+
+
 def _plan_silos(bents: list[BentStiffness], results: dict[str, RowResult],
                 criteria: BalanceCriteria, cfg: GlobalConfig,
                 floors: dict[str, float]) -> tuple[dict[str, float], list[str]]:
-    """Silo depths (in) that would bring every adjacent pair into compliance.
+    """Pairwise repair: deepen one silo at a time until every rule holds.
 
-    A silo only ever *softens*, so for a failing pair it is always one specific
-    pier that must be lengthened — and **both** code criteria can demand it:
+    A silo only ever *softens*, so for each failing check there is exactly one
+    pier to lengthen:
 
-    * balanced stiffness — the pier with the larger ``kappa`` comes down to
-      ``kappa_other / k_ratio_min``;
-    * balanced frame geometry — the pier with the SHORTER period comes down to
-      whatever stiffness puts its period at ``T_ratio_min * T_other``, i.e.
-      ``k = m * (2*pi / (T_ratio_min * T_other))**2``.
+    * **balanced stiffness** (inside a continuous frame, adjacent or any-two) —
+      the member with the larger ``kappa`` comes down to ``kappa_other / limit``;
+    * **balanced frame geometry** (between adjacent frames) — the frame with the
+      SHORTER period must soften, so its stiffest member comes down by enough to
+      bring ``K_frame`` to ``M_frame * (2*pi / (L_T * T_other))**2``.  Softening
+      any member lowers ``K_frame`` and so lengthens ``T_frame``.
 
-    Both must be driven.  Under mass normalisation the stiffness rule implies
-    the period rule (``sqrt(0.75) = 0.87 >= 0.70``) so the second demand never
-    binds — but with ``kappa = k`` the two decouple, and the period rule can be
-    the only thing failing.  A planner that watched stiffness alone would then
-    report "no further silo change is available" while a fix was in reach.
-    Note the period rule always carries mass through ``T = 2*pi*sqrt(m/k)``,
-    even when mass normalisation is switched off.
-
-    Sizing uses the elastic two-segment cantilever at the pier's current EI
-    (:func:`~seismic_column.balance.required_silo`), which is free — the caller
-    then pays for one real re-analysis per changed pier and iterates, because
-    the re-analysis may change the reinforcement and hence EI.
-
-    Sweeps forward then backward until the depths stop moving: softening a pier
-    toward its neighbour is monotone, and rounding up to ``silo_step_ft`` bounds
-    any overshoot past a neighbour on the other side.
-
-    This is only a *predictor*.  It holds EI and the fixity multiplier fixed —
-    in soil mode the multiplier is itself derived from the p-y solve at the
-    current silo, so the prediction is roughest there.  The caller always
-    verifies with a real re-analysis and loops, so a poor prediction costs an
-    extra pass, never a wrong answer.
+    Sweeps until the depths stop moving.  This is Gauss-Seidel on a monotone
+    system, so it converges to the same minimum the exact search finds — it just
+    needs more passes, and unlike the exact search it copes with the any-two rule
+    and with frames coupled through ``K_frame``.
     """
     cap = cfg.max_silo_ft * 12.0
     step = cfg.silo_step_ft * 12.0
     silos = {b.name: max(b.silo, floors.get(b.name, 0.0)) for b in bents}
     notes: list[str] = []
+    k_at, m_at = _silo_ctx(bents, results, cfg, silos)
 
-    def k_now(b: BentStiffness, bound: int) -> float:
-        """Lateral stiffness at the currently planned silo (elastic prediction)."""
-        rr = results[b.name]
-        geom = Geometry(Hcol=b.Hcol, D_shaft=rr.shaft.D, silo=silos[b.name])
-        return geom.lateral_stiffness(rr.assessment.EI_col,
-                                      rr.assessment.EI_shaft,
-                                      rr.assessment.bounds[bound].multiplier)
-
-    def T_of(b: BentStiffness, k: float) -> float:
-        return 2.0 * math.pi * math.sqrt(b.mass / k) if k > 0 else float("nan")
-
-    def soften_to(target_k: float, who: BentStiffness, other: BentStiffness,
+    def soften_to(target_k: float, who: BentStiffness, other: str,
                   bound: int, rule: str) -> bool:
-        """Plan a silo that brings ``who`` down to ``target_k``.  True if moved."""
+        """Plan a silo bringing ``who`` down to ``target_k``.  True if it moved."""
         rr = results[who.name]
         geom = Geometry(Hcol=who.Hcol, D_shaft=rr.shaft.D)
         h = required_silo(geom, rr.assessment.EI_col, rr.assessment.EI_shaft,
@@ -329,10 +361,11 @@ def _plan_silos(bents: list[BentStiffness], results: dict[str, RowResult],
                           silo_min=silos[who.name], silo_max=cap)
         if h is None:                      # the cap binds — go as deep as allowed
             notes.append(
-                f"{who.name}: {cfg.max_silo_ft:g} ft silo cap reached and still "
-                f"fails {rule} against {other.name} at the {who.label(bound)} "
-                f"bound — stiffen {other.name} (larger column), reduce its "
-                f"tributary mass, or raise the cap")
+                f"{who.name}: {cfg.max_silo_ft:g} ft silo cap is reached and "
+                f"{rule} against {other} still fails at the "
+                f"{who.label(bound)} bound — a silo only softens, so stiffen "
+                f"{other} (larger column), rebalance the tributary mass, or "
+                f"raise the cap")
             if silos[who.name] < cap:
                 silos[who.name] = cap
                 return True
@@ -343,56 +376,86 @@ def _plan_silos(bents: list[BentStiffness], results: dict[str, RowResult],
             return True
         return False
 
-    for _sweep in range(6):
+    for _sweep in range(8):
         moved = False
-        pairs = adjacent_pairs(bents)
-        for bi, bj in list(pairs) + list(reversed(pairs)):
-            n_bounds = min(len(bi.k), len(bj.k))
-            for bound in range(n_bounds):
-                ki, kj = k_now(bi, bound), k_now(bj, bound)
-                if not (math.isfinite(ki) and math.isfinite(kj)) or min(ki, kj) <= 0:
-                    continue
+        for direction in DIRECTIONS:
+            frames = frames_for(bents, direction)
 
-                # --- balanced stiffness: soften the larger kappa ---
-                ai = ki / bi.mass if criteria.mass_normalized else ki
-                aj = kj / bj.mass if criteria.mass_normalized else kj
-                if min(ai, aj) / max(ai, aj) < criteria.k_ratio_min:
-                    stiff, soft = (bi, bj) if ai > aj else (bj, bi)
-                    target = min(ai, aj) / criteria.k_ratio_min
-                    if criteria.mass_normalized:
-                        target *= stiff.mass
-                    moved |= soften_to(target, stiff, soft, bound,
-                                       "balanced stiffness")
-                    ki, kj = k_now(bi, bound), k_now(bj, bound)   # may have moved
-
-                # --- balanced frame geometry: soften the SHORTER period ---
-                Ti, Tj = T_of(bi, ki), T_of(bj, kj)
-                if not (math.isfinite(Ti) and math.isfinite(Tj)):
+            # --- balanced stiffness, inside a continuous frame ---
+            for f in frames:
+                if not f.continuous:
                     continue
-                if min(Ti, Tj) / max(Ti, Tj) < criteria.T_ratio_min:
-                    quick, slow = (bi, bj) if Ti < Tj else (bj, bi)
+                near = {(a.name, b.name) for a, b in zip(f.members, f.members[1:])}
+                for bound in range(f.n_bounds):
+                    for bi, bj in itertools.combinations(f.members, 2):
+                        limit = (criteria.k_ratio_min
+                                 if (bi.name, bj.name) in near
+                                 else criteria.k_ratio_any)
+                        ki = k_at(bi, silos[bi.name], bound)
+                        kj = k_at(bj, silos[bj.name], bound)
+                        mi = m_at(bi, silos[bi.name], direction)
+                        mj = m_at(bj, silos[bj.name], direction)
+                        if not (math.isfinite(ki) and math.isfinite(kj)):
+                            continue
+                        ai = ki / mi if criteria.mass_normalized else ki
+                        aj = kj / mj if criteria.mass_normalized else kj
+                        if min(ai, aj) <= 0 or min(ai, aj) / max(ai, aj) >= limit:
+                            continue
+                        stiff, soft = (bi, bj) if ai > aj else (bj, bi)
+                        target = min(ai, aj) / limit
+                        if criteria.mass_normalized:
+                            target *= m_at(stiff, silos[stiff.name], direction)
+                        moved |= soften_to(target, stiff, soft.name, bound,
+                                           f"balanced stiffness ({direction})")
+
+            # --- balanced frame geometry, between adjacent frames ---
+            for fi, fj in zip(frames, frames[1:]):
+                for bound in range(min(fi.n_bounds, fj.n_bounds)):
+                    Ki = sum(k_at(b, silos[b.name], bound) for b in fi.members)
+                    Mi = sum(m_at(b, silos[b.name], direction) for b in fi.members)
+                    Kj = sum(k_at(b, silos[b.name], bound) for b in fj.members)
+                    Mj = sum(m_at(b, silos[b.name], direction) for b in fj.members)
+                    if min(Ki, Kj) <= 0 or min(Mi, Mj) <= 0:
+                        continue
+                    Ti = 2.0 * math.pi * math.sqrt(Mi / Ki)
+                    Tj = 2.0 * math.pi * math.sqrt(Mj / Kj)
+                    if min(Ti, Tj) / max(Ti, Tj) >= criteria.T_ratio_min:
+                        continue
+                    quick, slow = (fi, fj) if Ti < Tj else (fj, fi)
+                    Kq, Mq = ((Ki, Mi) if quick is fi else (Kj, Mj))
                     T_target = criteria.T_ratio_min * max(Ti, Tj)
-                    target_k = quick.mass * (2.0 * math.pi / T_target) ** 2
-                    moved |= soften_to(target_k, quick, slow, bound,
-                                       "balanced frame geometry")
+                    K_target = Mq * (2.0 * math.pi / T_target) ** 2
+                    # take the whole reduction out of the stiffest member
+                    who = max(quick.members,
+                              key=lambda b: k_at(b, silos[b.name], bound))
+                    k_who = k_at(who, silos[who.name], bound)
+                    k_target = max(k_who - (Kq - K_target), 1e-6)
+                    moved |= soften_to(k_target, who, slow.key, bound,
+                                       f"balanced frame geometry ({direction})")
         if not moved:
             break
     return silos, dedupe(notes)
 
 
+def _all_frames_single(bents: list[BentStiffness]) -> bool:
+    """True when no frame has two bents acting together, in either direction."""
+    return all(not f.continuous
+               for d in DIRECTIONS for f in frames_for(bents, d))
+
+
 def _plan_silos_min(bents: list[BentStiffness], results: dict[str, RowResult],
                     criteria: BalanceCriteria, cfg: GlobalConfig,
                     floors: dict[str, float]) -> tuple[dict[str, float], list[str]]:
-    """Minimum-total-silo plan (exact on the buildable grid).
+    """Minimum-total-silo plan — exact on the buildable grid, where it applies.
 
-    Builds a predicted stiffness/mass table over every allowed silo depth using
-    the elastic two-segment cantilever at the pier's current EI, **calibrated**
-    so it reproduces the stiffness actually measured at the pier's current silo.
-    That correction matters in soil mode, where lengthening the column also
-    re-derives the point of fixity from the p-y solve, so the raw elastic
-    formula over-predicts how much a silo softens.  The caller verifies the plan
-    with a real analysis and re-calibrates, so a poor prediction costs a pass,
-    never a wrong answer.
+    With every frame a single bent (a run of simply supported spans) the only
+    rule left is balanced frame geometry between neighbours, so the bridge is a
+    chain and :func:`~seismic_column.balance.dp_min_silo` gives the true optimum.
+
+    A continuous frame breaks that: the any-two-bents rule makes it all-pairs,
+    and the period rule couples whole frames through ``K_frame``.  Neither fits a
+    neighbour-only chain, so :func:`_balance_stage` falls back to the pairwise
+    repair rather than claim an optimality this no longer has.
     """
     cap = cfg.max_silo_ft * 12.0
     step = cfg.silo_step_ft * 12.0
@@ -402,33 +465,26 @@ def _plan_silos_min(bents: list[BentStiffness], results: dict[str, RowResult],
     # this is not.)
     states = {b.name: silo_states(floors.get(b.name, 0.0), cap, step)
               for b in bents}
+    k_at, m_at = _silo_ctx(bents, results, cfg, {b.name: b.silo for b in bents})
 
-    # per-pier calibration factor: measured k / elastic k, at the current silo
-    corr: dict[str, float] = {}
-    for b in bents:
-        rr = results[b.name]
-        ke = stiffness_at_silo(Geometry(Hcol=b.Hcol, D_shaft=rr.shaft.D),
-                               rr.assessment.EI_col, rr.assessment.EI_shaft,
-                               rr.assessment.bounds[0].multiplier, b.silo)
-        corr[b.name] = (b.k[0] / ke) if ke > 0 else 1.0
+    def feasible(bi: BentStiffness, si: float,
+                 bj: BentStiffness, sj: float) -> bool:
+        """Single-bent frames, so only the period rule couples the two — and it
+        must hold in BOTH directions and at every bound."""
+        for direction in DIRECTIONS:
+            for bound in range(min(len(bi.k), len(bj.k))):
+                ki, kj = k_at(bi, si, bound), k_at(bj, sj, bound)
+                mi, mj = m_at(bi, si, direction), m_at(bj, sj, direction)
+                if min(ki, kj) <= 0 or min(mi, mj) <= 0:
+                    return False
+                Ti, Tj = math.sqrt(mi / ki), math.sqrt(mj / kj)   # 2*pi cancels
+                if min(Ti, Tj) / max(Ti, Tj) < criteria.T_ratio_min:
+                    return False
+        return True
 
-    def k_of(b: BentStiffness, silo: float, bound: int) -> float:
-        rr = results[b.name]
-        return corr[b.name] * stiffness_at_silo(
-            Geometry(Hcol=b.Hcol, D_shaft=rr.shaft.D),
-            rr.assessment.EI_col, rr.assessment.EI_shaft,
-            rr.assessment.bounds[bound].multiplier, silo)
-
-    def m_of(b: BentStiffness, silo: float) -> float:
-        # a deeper silo lengthens the column, so its self-weight participation
-        # grows — small, but it lowers kappa and raises T, so ignoring it would
-        # make the predictor optimistic
-        rr = results[b.name]
-        dW = column_self_weight(rr.design.section().Ag, silo - b.silo,
-                                cfg.concrete_unit_weight)
-        return b.mass + cfg.self_weight_mass_factor * dW / G_IN_S2
-
-    plan = dp_min_silo(bents, states, k_of, m_of, criteria)
+    ordered = [b for b in sorted(bents, key=lambda b: b.order)
+               if in_frame(b.frame)]
+    plan = dp_min_silo(bents, states, feasible, chain=[ordered])
     return plan.silos, plan.notes
 
 
@@ -442,44 +498,16 @@ def _balance_stage(results: list[RowResult], rows_by_name: dict[str, pd.Series],
     finally checked.
     """
     criteria = _criteria(cfg)
-    bents = _build_bents(results, order)
+    bents = _build_bents(results, order, cfg)
     checks = balance_checks(bents, criteria)
     log: list[str] = []
 
-    # With mass normalisation OFF the stiffness rule and the period rule pull on
-    # the same k ratio from opposite sides, and a large enough tributary-mass
-    # disparity makes them jointly unsatisfiable at ANY stiffness.  Say so up
-    # front rather than letting the silo search grind against it.
-    for bi, bj in adjacent_pairs(bents):
-        ok, mu, (x_lo, x_hi) = joint_feasible(bi, bj, criteria)
-        if not ok:
-            log.append(
-                f"INFEASIBLE — {bi.name}-{bj.name}: tributary masses differ by "
-                f"×{max(mu, 1 / mu):.2f} ({bi.mass:.2f} vs {bj.mass:.2f} "
-                f"kip·s²/in). With mass normalisation off, balanced stiffness "
-                f"needs k ratio ≥ {criteria.k_ratio_min:.2f} while balanced "
-                f"geometry needs it ≤ {mu / criteria.T_ratio_min ** 2:.2f} — no "
-                f"stiffness satisfies both, so no silo can fix this pair. "
-                f"Rebalance the tributary spans, or switch mass normalisation "
-                f"on (the Caltrans form), which makes the period rule "
-                f"automatic.")
-        else:
-            # how much of the unconstrained stiffness window the mass disparity
-            # has eaten; below ~60% the pair is the sensitive one on the bridge
-            full = 1.0 / criteria.k_ratio_min - criteria.k_ratio_min
-            if full > 0 and (x_hi - x_lo) / full < 0.6:
-                log.append(
-                    f"TIGHT — {bi.name}-{bj.name}: tributary masses differ by "
-                    f"×{max(mu, 1 / mu):.2f}, leaving only k ratio "
-                    f"[{x_lo:.3f}, {x_hi:.3f}] to satisfy both clauses at once "
-                    f"(vs [{criteria.k_ratio_min:.3f}, "
-                    f"{1 / criteria.k_ratio_min:.3f}] on a mass-matched pair) — "
-                    f"expect this pair to be the hard one to tune.")
     if len(bents) < 2:
         log.append("Fewer than two piers take part in the balance checks "
                    "(check the 'frame' column) — nothing to compare.")
+    frames = {d: frames_for(bents, d) for d in DIRECTIONS}
     result = BalanceResult(bents=bents, checks=checks, criteria=criteria,
-                           log=log, converged=True)
+                           frames=frames, log=log, converged=True)
     if result.passed or not cfg.balance_auto_silo or len(bents) < 2:
         if result.passed and len(bents) >= 2:
             log.append("All adjacent pairs comply as designed — no silo needed.")
@@ -493,11 +521,20 @@ def _balance_stage(results: list[RowResult], rows_by_name: dict[str, pd.Series],
               for rr in results}
 
     minimise = cfg.balance_strategy == "min_silo"
+    if minimise and not _all_frames_single(bents):
+        minimise = False
+        log.append(
+            "Silo strategy: fell back to pairwise repair. The exact search "
+            "solves a chain of neighbour-only constraints, but a continuous "
+            "frame is present — the any-two-bents rule makes it all-pairs and "
+            "the period rule couples whole frames through K_frame, neither of "
+            "which is a chain. The repair still converges; it just cannot claim "
+            "to be provably minimal here.")
     planner = _plan_silos_min if minimise else _plan_silos
     if minimise:
         log.append("Silo strategy: minimum total depth (exact on the buildable "
-                   f"{cfg.silo_step_ft:g} ft grid, per frame), verified against "
-                   "a real analysis each pass.")
+                   f"{cfg.silo_step_ft:g} ft grid), verified against a real "
+                   "analysis each pass.")
     # the cheapest FEASIBLE state seen, so a later refinement pass can never
     # leave the run worse off than one it already had
     best: tuple[float, list[RowResult], list, list] | None = None
@@ -543,13 +580,15 @@ def _balance_stage(results: list[RowResult], rows_by_name: dict[str, pd.Series],
                     results[idx] = rr
                     break
 
-        bents = _build_bents(results, order)
+        bents = _build_bents(results, order, cfg)
         checks = balance_checks(bents, criteria)
         result.bents, result.checks = bents, checks
+        result.frames = {d: frames_for(bents, d) for d in DIRECTIONS}
         if result.passed:
             total = sum(r.silo for r in results)
             if best is None or total < best[0] - 1e-9:
-                best = (total, list(results), list(bents), list(checks))
+                best = (total, list(results), list(bents), list(checks),
+                        dict(result.frames))
             log.append(f"Pass {outer}: balanced at {total / 12:g} ft of silo "
                        f"over {sum(1 for r in results if r.silo > 0)} pier(s).")
             if not minimise:
@@ -575,7 +614,7 @@ def _balance_stage(results: list[RowResult], rows_by_name: dict[str, pd.Series],
         total_now = sum(r.silo for r in results)
         if not result.passed or total_now > best[0] + 1e-9:
             results[:] = best[1]
-            result.bents, result.checks = best[2], best[3]
+            result.bents, result.checks, result.frames = best[2], best[3], best[4]
             by_name = {rr.name: rr for rr in results}
             log.append(f"Kept the cheapest feasible plan found: "
                        f"{best[0] / 12:g} ft of silo.")
@@ -666,13 +705,25 @@ def _summary_row(rr: RowResult, balance: BalanceResult | None = None) -> dict:
         "checks_failed": "; ".join(c.name for c in a.checks if not c.passed) or "-",
     }
     if balance is not None:
-        rk = balance.worst_ratio(rr.name, STIFFNESS_CHECK)
-        rt = balance.worst_ratio(rr.name, GEOMETRY_CHECK)
+        # stiffness is keyed on the pier; the geometry rule is keyed on the
+        # FRAME the pier sits in, which differs by direction
+        keys = balance.frames_of(rr.name) | {rr.name}
+        def _worst(check_name, direction=None):
+            vals = [c.ratio for c in balance.checks
+                    if c.name == check_name and keys & set(c.pair)
+                    and (direction is None or c.direction == direction)
+                    and not math.isnan(c.ratio)]
+            return round(min(vals), 3) if vals else None
         row.update({
             "frame": rr.frame,
-            "bal_k_ratio": round(rk, 3) if rk is not None else None,
-            "bal_T_ratio": round(rt, 3) if rt is not None else None,
-            "balanced": ("-" if rk is None and rt is None
+            "deck_link": rr.deck_link,
+            "T_long_s": round(a.bounds[0].demand.period, 3),
+            "bal_k_ratio": min([v for v in (_worst(STIFFNESS_CHECK),
+                                            _worst(STIFFNESS_ANY_CHECK))
+                                if v is not None], default=None),
+            "bal_T_long": _worst(GEOMETRY_CHECK, LONGITUDINAL),
+            "bal_T_trans": _worst(GEOMETRY_CHECK, TRANSVERSE),
+            "balanced": ("-" if not balance.touches(rr.name)
                          else ("PASS" if balance.pier_passed(rr.name) else "FAIL")),
         })
     return row

@@ -447,12 +447,16 @@ def column_report(rr: RowResult) -> str:
 
 
 def balance_report(balance) -> str:
-    """Markdown calc sheet for the adjacent-pier balance checks.
+    """Markdown calc sheet for the balance checks.
 
     ``balance`` is a :class:`~seismic_column.balance.BalanceResult`.  Covers the
     whole run, not one column, so it is a separate document from
     :func:`column_report`.
     """
+    from .balance import (END_CONDITION_NOTE, GEOMETRY_CHECK,
+                          STIFFNESS_ANY_CHECK, STIFFNESS_CHECK)
+    from .io_schema import DIRECTIONS
+
     cr = balance.criteria
     kap = cr.kappa_symbol
     lines: list[str] = []
@@ -463,85 +467,145 @@ def balance_report(balance) -> str:
     add(f"**Result:** {'PASS ✅' if balance.passed else 'FAIL ❌'}"
         + ("" if balance.converged else "  —  *did not converge*"))
     add("")
-    add("**Scope.** The piers below carry **simply supported spans in series**, "
-        "so each pier is strictly its own single-bent frame. They are treated "
-        "as one frame of bents so that the **adjacent**-bent stiffness rule "
-        "applies between neighbouring piers, together with the adjacent-frame "
-        "period rule. The any-two-bents rule (0.50) is **not** applied. "
-        "Adjacency is table row order within each `frame` group; a pier with a "
-        "blank `frame` is excluded.")
+    add("**Scope.** The two rules act at different levels. Balanced *stiffness* "
+        "compares bents **inside one frame**, so it has nothing to say about a "
+        "run of simply supported spans — each of those is its own single-bent "
+        "frame. Balanced *frame geometry* compares **adjacent frames** and "
+        "applies everywhere. Both are evaluated **longitudinally and "
+        "transversely**, because the tributary mass a bent restrains differs by "
+        "direction and so do the periods. A pier with a blank `frame` is left "
+        "out of the checks entirely.")
     add("")
     add("**Criteria.**")
-    _chk(add, "Balanced stiffness (adjacent bents)",
+    _chk(add, "Balanced stiffness — adjacent bents in a frame",
          f"min(κi, κj) / max(κi, κj) ≥ {cr.k_ratio_min:.2f},  κ = {kap}",
-         f"evaluated at every fixity bound, like-for-like (stiff-vs-stiff, "
-         f"soft-vs-soft)", ref=cr.ref_stiffness)
-    _chk(add, "Balanced frame geometry (adjacent frames)",
+         "evaluated at every fixity bound, like-for-like (stiff-vs-stiff, "
+         "soft-vs-soft)", ref=cr.ref_stiffness)
+    _chk(add, "Balanced stiffness — any two bents in a frame",
+         f"min(κi, κj) / max(κi, κj) ≥ {cr.k_ratio_any:.2f}",
+         "reported for NON-adjacent pairs only: an adjacent pair is also 'any "
+         f"two', but its {cr.k_ratio_min:.2f} limit is stricter, so the looser "
+         "check can never govern there", ref=cr.ref_stiffness_any)
+    _chk(add, "Balanced frame geometry — adjacent frames",
          f"min(Ti, Tj) / max(Ti, Tj) ≥ {cr.T_ratio_min:.2f}",
-         "T is the effective (cracked) period already used for the "
-         "displacement demand", ref=cr.ref_geometry)
+         "T is the FRAME period, not a bent's", ref=cr.ref_geometry)
     add("")
     if cr.mass_normalized:
         add(f"*Note:* with κ = k/m and T = 2π√(m/k), (Ti/Tj)² = κj/κi, so a "
             f"stiffness ratio of {cr.k_ratio_min:.2f} gives a period ratio of "
             f"√{cr.k_ratio_min:.2f} = {math.sqrt(cr.k_ratio_min):.3f} ≥ "
-            f"{cr.T_ratio_min:.2f}. The balanced-stiffness rule therefore "
-            "*implies* the balanced-geometry rule here; both are reported "
-            "because they are separately named clauses.")
+            f"{cr.T_ratio_min:.2f}. Within one frame the stiffness rule "
+            "therefore implies the geometry rule; between frames it does not, "
+            "because the frame period comes from ΣK and ΣM.")
     else:
         add("*Note:* κ = k (the constant-width form), so the stiffness and "
-            "period rules are independent checks.")
+            "period rules are independent. Mass still enters the period rule "
+            "through T = 2π√(m/k) — switching normalisation off removes mass "
+            "from §7.1.2, never from §7.1.3.")
     add("")
 
+    # ------------------------------------------------------------------
+    add("## Frames")
+    add("")
+    add("A frame is the set of bents that act together in that direction, "
+        "derived from each bent's `deck_link`: an `integral` bent (monolithic, "
+        "fixed moment connection) resists both ways; a `bearing` bent released "
+        "longitudinally but shear-keyed joins the frame transversely only, and "
+        "stands alone longitudinally holding whatever span it is fixed to; a "
+        "`free` bent resists neither.")
+    add("")
+    add("Frame period is the frame's, on the rigid-deck stand-alone "
+        "idealisation — the members deflect together, so their stiffnesses add:")
+    add("")
+    _eq(add, "T_frame", "2π · √(M_frame / K_frame)",
+        "K_frame = Σ kᵢ and M_frame = Σ mᵢ over the members that resist in this "
+        "direction", "one period per frame, per fixity bound",
+        ref=cr.ref_geometry)
+    add("")
+    add(f"*{END_CONDITION_NOTE}*")
+    add("")
+
+    n_b = max((len(b.k) for b in balance.bents), default=0)
+    for direction in DIRECTIONS:
+        frames = balance.frames.get(direction, [])
+        if not frames:
+            continue
+        add(f"### {direction.capitalize()}")
+        add("")
+        hdr = "| Frame | Bents | M (kip·s²/in) |"
+        sep = "|:--|:--|--:|"
+        for i in range(n_b):
+            lbl = balance.bents[0].label(i) if balance.bents else f"bound {i+1}"
+            hdr += f" K [{lbl}] (kip/in) | T [{lbl}] (s) |"
+            sep += "--:|--:|"
+        add(hdr)
+        add(sep)
+        for f in frames:
+            row = (f"| {f.key} | {' + '.join(f.names)}"
+                   f"{' *(continuous)*' if f.continuous else ''} "
+                   f"| {f.M():.3f} |")
+            for i in range(n_b):
+                if i < f.n_bounds:
+                    row += f" {f.K(i):.2f} | {f.T(i):.3f} |"
+                else:
+                    row += " — | — |"
+            add(row)
+        add("")
+
+    # ------------------------------------------------------------------
     add("## Bents")
     add("")
     add("k is the effective lateral stiffness of the two-segment equivalent "
         "cantilever at cracked stiffness EI = Mp/φy — the same k that drives "
-        "each pier's displacement demand.")
+        "each pier's displacement demand, and the same in both directions "
+        "because a circular column on a circular shaft is axisymmetric.")
     add("")
-    add("**m** is the tributary mass the codes call for, and is the same mass "
-        "that sets the period and the displacement demand, so "
-        "(Ti/Tj)² = κj/κi holds exactly. It is")
-    add("")
-    add("- the entered tributary weight (superstructure over the tributary "
-        "span + cap), **plus**")
-    add("- the column self-weight over the free length H_free, at the "
-        "participation factor set in the settings (default 1/3, the usual "
-        "cantilever modal approximation) — so lengthening a column with a silo "
-        "also adds a little mass, which lowers κ and raises T,")
-    add("- **excluding** the embedded shaft below the top of shaft: that mass "
+    add("**m** is the tributary mass the codes call for. It is the entered "
+        "tributary weight for that direction, **plus** the column self-weight "
+        "over the free length H_free at the participation factor in the "
+        "settings (default 1/3), **excluding** the embedded shaft — that mass "
         "is restrained by the surrounding soil and does not participate in the "
-        "sway mode. It is not negligible in absolute terms, so treat its "
-        "exclusion as a modelling assumption, not a rounding.")
+        "sway mode. The exclusion is a modelling assumption, not a rounding.")
     add("")
-    n_b = max((len(b.k) for b in balance.bents), default=0)
-    hdr = ("| Pier | Frame | Hcol (ft) | Silo (ft) | H_free (ft) | m (kip·s²/in) |"
-           + "".join(f" k [{balance.bents[0].label(i)}] (kip/in) |"
-                     f" T [{balance.bents[0].label(i)}] (s) |" for i in range(n_b)))
+    hdr = ("| Pier | Frame | Deck link | Hcol (ft) | Silo (ft) | H_free (ft) "
+           "| m long. | m trans. |")
+    sep = "|:--|:--|:--|--:|--:|--:|--:|--:|"
+    for i in range(n_b):
+        lbl = balance.bents[0].label(i) if balance.bents else f"bound {i+1}"
+        hdr += f" k [{lbl}] (kip/in) |"
+        sep += "--:|"
     add(hdr)
-    add("|:--|:--|--:|--:|--:|--:|" + "--:|--:|" * n_b)
+    add(sep)
     for b in balance.bents:
-        row = (f"| {b.name} | {b.frame} | {b.Hcol/12:.1f} | {b.silo/12:.1f} | "
-               f"{b.H_free/12:.1f} | {b.mass:.3f} |")
+        row = (f"| {b.name} | {b.frame} | {b.deck_link} | {b.Hcol/12:.1f} | "
+               f"{b.silo/12:.1f} | {b.H_free/12:.1f} | {b.mass_long:.3f} | "
+               f"{b.mass_trans:.3f} |")
         for i in range(n_b):
             row += (f" {b.k[i]:.2f} |" if i < len(b.k) else " — |")
-            row += (f" {b.T[i]:.3f} |" if i < len(b.T) else " — |")
         add(row)
     add("")
 
-    add("## Adjacent pairs")
+    # ------------------------------------------------------------------
+    add("## Checks")
     add("")
     if not balance.checks:
-        add("*No adjacent pairs to check* — fewer than two piers take part "
-            "(see the `frame` column).")
+        add("*No pairs to check* — fewer than two frames take part (see the "
+            "`frame` column).")
     else:
-        add("| Check | Pair | Bound | Ratio | Limit | Status | Values |")
-        add("|:--|:--|:--|--:|--:|:--|:--|")
-        for c in balance.checks:
-            ratio = "—" if math.isnan(c.ratio) else f"{c.ratio:.3f}"
-            add(f"| {c.name} | {c.pair[0]}–{c.pair[1]} | {c.bound} | {ratio} | "
-                f"{c.limit:.2f} | {'OK ✅' if c.passed else 'NG ❌'} | {c.note} |")
-    add("")
+        for direction in DIRECTIONS:
+            rows = [c for c in balance.checks if c.direction == direction]
+            if not rows:
+                continue
+            add(f"### {direction.capitalize()}")
+            add("")
+            add("| Check | Pair | Frame | Bound | Ratio | Limit | Status | Values |")
+            add("|:--|:--|:--|:--|--:|--:|:--|:--|")
+            for c in rows:
+                ratio = "—" if math.isnan(c.ratio) else f"{c.ratio:.3f}"
+                add(f"| {c.name} | {c.pair[0]}–{c.pair[1]} | {c.scope or '—'} "
+                    f"| {c.bound} | {ratio} | {c.limit:.2f} | "
+                    f"{'OK ✅' if c.passed else 'NG ❌'} | {c.note} |")
+            add("")
 
     if balance.log:
         add("## Balancing log")
@@ -556,6 +620,16 @@ def balance_report(balance) -> str:
         for entry in balance.log:
             add(f"- {entry}")
         add("")
+
+    add("## What this section does NOT cover")
+    add("")
+    add("- The per-bent **seismic** suite runs on the LONGITUDINAL tributary "
+        "mass and the fixed-free cantilever, unchanged by anything above. The "
+        "transverse demand is not checked.")
+    add("- A bent inside a continuous frame is still designed as a stand-alone "
+        "cantilever, not from the frame's displacement demand.")
+    add(f"- {END_CONDITION_NOTE}")
+    add("")
 
     return "\n".join(lines)
 

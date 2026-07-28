@@ -216,6 +216,7 @@ def test_soil_presets_build_and_solve():
         df_eq["SeaTac Piers A8–A11 (GWT 10 ft)"]
 
 
+@pytest.mark.slow
 def test_optimizer_sizes_shaft_for_inground_py_demand():
     """The optimiser escalates shaft steel until the p-y IN-GROUND flexure and
     shear checks pass — the demand depends on the shaft's own stiffness, so this

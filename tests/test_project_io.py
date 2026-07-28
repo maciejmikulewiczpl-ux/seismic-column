@@ -34,6 +34,7 @@ def test_bundles_flow_into_section():
     assert col.section().Ast == pytest.approx(expected)
 
 
+@pytest.mark.slow
 def test_results_to_dataframe_captures_optimised_design():
     cfg = GlobalConfig(code="SDC 2.1", optimize=True,
                        variable=("longitudinal", "confinement", "fc"))
@@ -52,6 +53,7 @@ def test_results_to_dataframe_captures_optimised_design():
         assert int(row["spiral_bundle"]) == rr.design.spiral_bundle
 
 
+@pytest.mark.slow
 def test_project_roundtrip_preserves_optimised_designs(tmp_path):
     cfg = GlobalConfig(code="SDC 2.1", optimize=True, allow_bundling=True,
                        variable=("longitudinal", "confinement", "fc"))

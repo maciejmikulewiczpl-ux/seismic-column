@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 
 from seismic_column.batch import run_batch
 from seismic_column.io_schema import (
@@ -32,6 +33,7 @@ def test_roundtrip_csv(tmp_path):
     assert len(df2) == 2
 
 
+@pytest.mark.slow
 def test_run_batch_optimize():
     df = default_dataframe(2)
     # fix the column diameter (exclude the slow diameter search) — this test is
@@ -45,6 +47,7 @@ def test_run_batch_optimize():
         assert r.feasible  # starter batch should be solvable
 
 
+@pytest.mark.slow
 def test_optimizer_reaches_feasible():
     start = ColumnDesign(D=48, fc=4, cover=2, n_bars=12, long_bar_no=8,
                          spiral_bar_no=4, spiral_spacing=5)
@@ -64,6 +67,7 @@ def test_optimizer_reaches_feasible():
     assert res.assessment.passed
 
 
+@pytest.mark.slow
 def test_report_renders():
     df = default_dataframe(1)
     _, results = run_batch(df, GlobalConfig(optimize=False))   # render, don't optimise
@@ -90,6 +94,7 @@ def test_project_roundtrip():
     assert cfg2.optimize is False
 
 
+@pytest.mark.slow
 def test_run_batch_progress_callback():
     """The optional progress callback fires once per column with a growing
     done-count reaching (total, total) and a status label."""
@@ -102,6 +107,7 @@ def test_run_batch_progress_callback():
     assert all(c[3] in ("PASS", "FAIL", "ERROR") for c in calls)
 
 
+@pytest.mark.slow
 def test_run_batch_without_callback_unchanged():
     summary, results = run_batch(default_dataframe(2), GlobalConfig(optimize=False))
     assert len(summary) == 2 and len(results) == 2
@@ -133,6 +139,7 @@ def test_fractional_spacing_writeback_when_input_is_integer():
     assert out.loc[0, "shaft_spiral_spacing_in"] == 3.5
 
 
+@pytest.mark.slow
 def test_blank_reinforcement_allowed_when_optimising_but_not_checking():
     """Optimise runs may leave the rebar/f'c blank (the optimiser sizes them);
     check runs still require them."""
@@ -151,6 +158,6 @@ def test_blank_reinforcement_allowed_when_optimising_but_not_checking():
         run_batch(df, GlobalConfig(optimize=False))
     # a required (non-reinforcement) blank still errors even when optimising
     df2 = default_dataframe(1)
-    df2.loc[0, "weight_kip"] = np.nan
+    df2.loc[0, "weight_long_kip"] = np.nan
     with pytest.raises(ValueError, match="missing values"):
         run_batch(df2, GlobalConfig(optimize=True))

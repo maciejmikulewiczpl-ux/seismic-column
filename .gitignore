@@ -9,3 +9,6 @@ refs/
 # Live project data - keep engineering files out of the repo unless
 # deliberately added (seismic_project (1).json is a checked-in sample)
 seismic_project_EN.json
+seismic_project_EN_solved.json
+balance_report_EN.md
+seismic_project_EN_framed.json

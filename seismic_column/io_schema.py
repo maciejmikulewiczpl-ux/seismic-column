@@ -10,7 +10,8 @@ Length inputs in the table:
     Dcol_in            : starting/fixed column diameter, in
     all *_in spacings  : in
 Loads:
-    weight_kip         : tributary weight, kip
+    weight_long_kip    : tributary weight restrained longitudinally, kip
+    weight_trans_kip   : tributary weight restrained transversely, kip
     axial_kip          : axial dead load, kip
 """
 from __future__ import annotations
@@ -27,10 +28,12 @@ from .demand import SpectrumSpec
 COLUMNS: tuple[str, ...] = (
     "name",
     "frame",
+    "deck_link",
     "Hcol_ft",
     "silo_ft",
     "D_shaft_in",
-    "weight_kip",
+    "weight_long_kip",
+    "weight_trans_kip",
     "axial_kip",
     "Dcol_in",
     "fc_ksi",
@@ -54,8 +57,21 @@ COLUMNS: tuple[str, ...] = (
     "shaft_spiral_bundle",
 )
 
-TEXT_COLUMNS: tuple[str, ...] = ("name", "frame")
+TEXT_COLUMNS: tuple[str, ...] = ("name", "frame", "deck_link")
 NUMERIC_COLUMNS = tuple(c for c in COLUMNS if c not in TEXT_COLUMNS)
+
+# How the deck attaches at a bent.  This is the physical detail; which
+# directions the bent actually resists in is DERIVED from it (see
+# ``seismic_column.balance.frames_for``):
+#
+#   integral  monolithic, fixed moment connection   -> resists long. + trans.
+#   bearing   released longitudinally, shear key    -> resists trans. only
+#   free      no restraint either way               -> resists neither
+DECK_LINKS: tuple[str, ...] = ("integral", "bearing", "free")
+
+# Longitudinal / transverse.  Used as dict keys and check labels throughout.
+LONGITUDINAL, TRANSVERSE = "longitudinal", "transverse"
+DIRECTIONS: tuple[str, ...] = (LONGITUDINAL, TRANSVERSE)
 
 # A ``frame`` cell holding one of these means "leave this pier out of the
 # balanced-stiffness / balanced-geometry adjacency checks".
@@ -88,10 +104,25 @@ COLUMN_META: dict[str, tuple[str, str]] = {
                 "may increase it, never reduce it."),
     "D_shaft_in": ("Shaft dia. (in)",
                    "Type II shaft (enlarged pile) outside diameter."),
-    "weight_kip": ("Seismic weight W (kip)",
-                   "Tributary weight this column carries that participates as "
-                   "seismic MASS (drives period and displacement demand). "
-                   "Superstructure dead load in the tributary span + cap."),
+    "weight_long_kip": ("Seismic weight W, long. (kip)",
+                        "Tributary weight this bent restrains LONGITUDINALLY. "
+                        "A bent on a longitudinally-released bearing carries "
+                        "none of the deck it releases - only the span it is "
+                        "fixed to. This is the weight the per-bent seismic "
+                        "checks use (drives period and displacement demand)."),
+    "weight_trans_kip": ("Seismic weight W, trans. (kip)",
+                         "Tributary weight this bent restrains TRANSVERSELY. "
+                         "Shear keys engage a bent transversely even where the "
+                         "bearing is released longitudinally, so this normally "
+                         "includes half of each adjacent span. Blank = same as "
+                         "the longitudinal weight. Used by the balance checks "
+                         "only."),
+    "deck_link": ("Deck connection",
+                  "How the deck attaches here: 'integral' (monolithic, fixed "
+                  "moment connection - resists both ways), 'bearing' (released "
+                  "longitudinally, shear key transversely - resists "
+                  "transversely only), or 'free' (resists neither). Drives "
+                  "which bents form a frame in each direction."),
     "axial_kip": ("Axial load P (kip)",
                   "Sustained axial COMPRESSION on the column section used for "
                   "moment-curvature, P-Delta and shear (the P in the P-M "
@@ -164,7 +195,8 @@ class GlobalConfig:
     # run without the feature.
     balance_check: bool = True
     balance_mass_normalized: bool = True  # compare k/m (Caltrans form / SGS variable width)
-    balance_k_ratio_min: float = 0.75     # min(ki,kj)/max(ki,kj) for adjacent piers
+    balance_k_ratio_min: float = 0.75     # min(ki,kj)/max(ki,kj), adjacent bents
+    balance_k_ratio_any: float = 0.50     # ... any two bents in a frame
     balance_T_ratio_min: float = 0.70     # min(Ti,Tj)/max(Ti,Tj) for adjacent piers
     balance_auto_silo: bool = True        # let the tool size column silos to comply
     # How the silo depths are chosen:
@@ -334,10 +366,12 @@ def default_row(name: str = "C1") -> dict:
     return {
         "name": name,
         "frame": "F1",
+        "deck_link": "integral",
         "Hcol_ft": 22.0,
         "silo_ft": 0.0,
         "D_shaft_in": 84.0,
-        "weight_kip": 800.0,
+        "weight_long_kip": 800.0,
+        "weight_trans_kip": 800.0,
         "axial_kip": 800.0,
         "Dcol_in": 48.0,
         "fc_ksi": 4.0,
@@ -366,8 +400,12 @@ def default_dataframe(n: int = 3) -> pd.DataFrame:
     rows = []
     for i in range(n):
         r = default_row(f"C{i+1}")
+        # simply supported spans are the default: one frame per bent, so no
+        # balanced-stiffness rule applies between them
+        r["frame"] = f"F{i + 1}"
         r["Hcol_ft"] = 18.0 + 4.0 * i
-        r["weight_kip"] = 700.0 + 100.0 * i
+        r["weight_long_kip"] = 700.0 + 100.0 * i
+        r["weight_trans_kip"] = 700.0 + 100.0 * i
         r["axial_kip"] = 700.0 + 100.0 * i
         rows.append(r)
     return pd.DataFrame(rows, columns=list(COLUMNS))
@@ -423,23 +461,60 @@ def validate(df: pd.DataFrame, min_shaft_oversize: float = 0.0,
     that wants the stricter reading can.
     """
     df = df.copy()
-    missing_required = {"Hcol_ft", "D_shaft_in", "weight_kip", "axial_kip", "Dcol_in"}
+    # --- migrate an older table BEFORE anything else looks at it -------------
+    # weight_kip was the single tributary weight; it is the LONGITUDINAL one.
+    if "weight_kip" in df.columns and "weight_long_kip" not in df.columns:
+        df = df.rename(columns={"weight_kip": "weight_long_kip"})
+    # A table with no deck_link column predates the frame model.  Its `frame`
+    # column (if any) was filled with a single id for every row, which under the
+    # new rules would read as ONE giant continuous frame and start applying the
+    # any-two-bents rule.  Simply supported spans are the safe reading, so give
+    # every bent its own frame -- and record it, because silently regrouping
+    # someone's structure would be indefensible.
+    legacy_frames = "deck_link" not in df.columns
+    df.attrs.setdefault("migrations", [])
+    if legacy_frames:
+        df.attrs["migrations"] = df.attrs["migrations"] + [
+            "Table predates the deck_link column, so every bent was given its "
+            "own frame (simply supported spans). Set `frame` and `deck_link` "
+            "to declare a continuous frame."]
+
+    missing_required = {"Hcol_ft", "D_shaft_in", "axial_kip", "Dcol_in"}
     absent = missing_required - set(df.columns)
     if absent:
         raise ValueError(f"Batch table missing required columns: {sorted(absent)}")
+    if "weight_long_kip" not in df.columns:
+        raise ValueError("Batch table missing required column: 'weight_long_kip' "
+                         "(older tables may use 'weight_kip')")
 
     defaults = default_row()
     for col in COLUMNS:
         if col not in df.columns:
-            df[col] = defaults[col]
+            # weight_trans_kip must fall back to the LONGITUDINAL weight of the
+            # same row, not to a starter constant, so leave it blank for the
+            # fillna below to resolve.
+            df[col] = float("nan") if col == "weight_trans_kip" else defaults[col]
     df = df[list(COLUMNS)]
 
-    # ``frame`` groups piers for the balance checks.  A missing COLUMN means an
-    # older table, which is one run of piers in series -> one frame.  A blank
-    # CELL is meaningful and preserved: that pier opts out (see ``in_frame``).
+    # ``frame`` groups piers into a frame for the balance checks.  A blank CELL
+    # is meaningful and preserved: that pier opts out (see ``in_frame``).
     df["frame"] = df["frame"].fillna("").astype(str).str.strip()
+    if legacy_frames:
+        df["frame"] = [f"F{i + 1}" for i in range(len(df))]
+    # deck_link: how the deck attaches, which derives directional participation
+    df["deck_link"] = (df["deck_link"].fillna("").astype(str).str.strip()
+                       .str.lower().replace("", "integral"))
+    bad_link = sorted(set(df["deck_link"]) - set(DECK_LINKS))
+    if bad_link:
+        raise ValueError(f"Unknown deck_link {bad_link}; choose from "
+                         f"{list(DECK_LINKS)}")
     # A silo is optional everywhere; blank = none.
     df["silo_ft"] = pd.to_numeric(df["silo_ft"], errors="coerce").fillna(0.0)
+    # Transverse weight defaults to the longitudinal one, so a table that never
+    # distinguished them behaves exactly as before.
+    df["weight_trans_kip"] = pd.to_numeric(
+        df["weight_trans_kip"], errors="coerce").fillna(
+            pd.to_numeric(df["weight_long_kip"], errors="coerce"))
 
     for col in NUMERIC_COLUMNS:
         df[col] = pd.to_numeric(df[col], errors="coerce")

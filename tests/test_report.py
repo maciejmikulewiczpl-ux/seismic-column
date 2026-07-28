@@ -25,7 +25,10 @@ def _reports(code, optimize=False, n=3):
 
 
 @pytest.mark.parametrize("code", CODES)
-@pytest.mark.parametrize("optimize", [False, True])
+@pytest.mark.parametrize("optimize", [
+    False,
+    pytest.param(True, marks=pytest.mark.slow),   # runs the optimiser
+])
 def test_report_renders_every_section(code, optimize):
     for rr, text in _reports(code, optimize):
         assert text.startswith("# Seismic Column Report")
@@ -86,6 +89,7 @@ def test_report_shows_symbolic_then_numeric(code):
         assert detail.count("*[") >= 10      # many bracketed code references
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("code", CODES)
 def test_report_pass_fail_matches_assessment(code):
     """Every failing check must be flagged NG somewhere in the report, and a

@@ -63,6 +63,7 @@ def test_shaft_longitudinal_respects_max_ratio():
     assert rr.shaft.section().rho_l <= 0.04 + 1e-9
 
 
+@pytest.mark.slow
 def test_shaft_grows_with_column_to_keep_oversize():
     """When the optimiser grows the column, the shaft is enlarged so it stays
     >= column + min oversize (default 24 in) — no 6 in oversize results."""
@@ -91,6 +92,7 @@ def test_shaft_grows_with_column_to_keep_oversize():
     assert res.shaft.D - res.design.D >= 24
 
 
+@pytest.mark.slow
 def test_min_oversize_respects_code_floor_under_caltrans():
     """A user oversize below the Caltrans 24 in Type II floor is raised to 24."""
     from seismic_column.optimizer import ColumnDesign, OptimizeSpec, optimize_column
@@ -110,6 +112,7 @@ def test_min_oversize_respects_code_floor_under_caltrans():
     assert res.shaft.D - res.design.D >= 24                 # code floor wins
 
 
+@pytest.mark.slow
 def test_objectives_trade_diameter_for_steel():
     """The objectives span the diameter/steel trade-off: min_diameter gives the
     smallest column (heavier steel), min_steel a larger column at the ~1% floor,
@@ -152,6 +155,7 @@ def test_objectives_trade_diameter_for_steel():
     assert md.design.D <= ts.design.D <= ms.design.D
 
 
+@pytest.mark.slow
 def test_fixed_diameter_objective_minimises_steel_at_entered_size():
     """'fixed_diameter' keeps the entered column diameter and returns the
     smallest feasible longitudinal ratio there (no diameter search)."""
@@ -178,6 +182,7 @@ def test_fixed_diameter_objective_minimises_steel_at_entered_size():
     assert res.design.rho_l() >= 0.01 - 1e-9          # not below the floor
 
 
+@pytest.mark.slow
 def test_fixed_diameter_result_is_independent_of_entered_reinforcement():
     """Regression: the optimiser must start from the MINIMUM longitudinal and
     transverse regardless of what reinforcement was entered — a heavy input used

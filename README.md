@@ -38,14 +38,24 @@ code; see [seismic_column/provisions.py](seismic_column/provisions.py).
   assumed, so `μΔ` in `α'` is the computed displacement-ductility demand.
 - Greedy, **priority-ordered optimiser** (default: longitudinal → confinement →
   diameter → f'c) with user-selectable fixed/variable parameters.
-- **Balanced stiffness & balanced frame geometry between adjacent piers** —
-  Caltrans SDC 2.1 **§7.1.2** (Table 7.1.2-1) and **§7.1.3**, AASHTO SGS
-  **§4.1.2** and **§4.1.3**. Piers carrying simply supported spans in series are
-  grouped by a `frame` column and compared in table row order:
-  `min(κi,κj)/max(κi,κj) ≥ 0.75` with `κ = kᵉ/m` (or `kᵉ` for the constant-width
-  AASHTO form) and `min(Ti,Tj)/max(Ti,Tj) ≥ 0.70`, evaluated at **every** fixity
-  bound like-for-like. Adjacent pairs only; the any-two-bents 0.50 rule is not
-  applied. The whole feature is behind one tick in the sidebar.
+- **Balanced stiffness & balanced frame geometry** — Caltrans SDC 2.1
+  **§7.1.2** (Table 7.1.2-1) and **§7.1.3**, AASHTO SGS **§4.1.2** and
+  **§4.1.3** — applied at the level each rule actually acts on:
+  - *Balanced stiffness* compares bents **inside one frame**: adjacent members
+    `≥ 0.75`, any two members `≥ 0.50`, with `κ = kᵉ/m` (or `kᵉ` for the
+    constant-width AASHTO form). A run of simply supported spans is a run of
+    **single-bent frames**, so no stiffness rule applies there.
+  - *Balanced frame geometry* compares **adjacent frames**, `Ti/Tj ≥ 0.70`,
+    everywhere. The frame period is the frame's: `T = 2π√(ΣM/ΣK)` over the
+    members that resist, on the rigid-deck stand-alone idealisation.
+  - Both are evaluated **longitudinally and transversely** and at **every**
+    fixity bound like-for-like. The whole feature is behind one tick.
+- **Frames are derived per direction** from a `deck_link` column — `integral`
+  (monolithic, fixed moment connection), `bearing` (released longitudinally,
+  shear key transversely) or `free`. A bearing therefore joins the continuous
+  frame transversely and stands alone longitudinally, holding whatever span it
+  is fixed to. Tributary weight is entered per direction
+  (`weight_long_kip` / `weight_trans_kip`).
 - **Column silos** (isolation casings) as the tuning lever — SDC **C7.1.2** /
   SGS **§4.1.4**. A silo of depth `h` lowers the top of shaft and lengthens the
   free column to `H_free = Hcol + h`, softening a stiff pier; the plastic hinge
@@ -123,6 +133,17 @@ Run the tests:
   (the shaft now starts that much deeper) while carrying the removed overburden
   forward, so the near-surface wedge terms restart at the bottom of the silo —
   the conservative, conventional isolation-casing treatment.
+- **The balance checks do not change the seismic run.** The per-bent seismic
+  suite keeps its fixed-free cantilever and its longitudinal tributary mass.
+  Consequently the transverse demand is not checked, and a bent inside a
+  continuous frame is still designed as a stand-alone cantilever rather than
+  from the frame's displacement demand.
+- **Frame stiffness uses the fixed-free member** (`3EcIeff/L³`). That is right
+  transversely and for every simply supported bent, but an integral bent is a
+  fixed moment connection and so is fixed-fixed *longitudinally*
+  (`12EcIeff/L³`, SDC C7.1.2-2). Longitudinal `K_frame` is therefore understated
+  and `T_long` overstated for a continuous frame — an approximation the report
+  states wherever it prints a frame period.
 - **Shaft flexural demand basis** is configurable: `interface` (default — the
   column overstrength moment `Mo` at the top of shaft, the standard SDC
   capacity-protection demand) or `fixity` (Mo amplified linearly to the assumed

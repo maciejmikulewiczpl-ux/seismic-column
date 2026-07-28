@@ -6,17 +6,22 @@ import pytest
 
 from seismic_column.balance import (
     GEOMETRY_CHECK,
+    STIFFNESS_ANY_CHECK,
     STIFFNESS_CHECK,
     BalanceCriteria,
     BentStiffness,
     adjacent_pairs,
     balance_checks,
+    frames_for,
     quantise_silo,
     required_silo,
 )
 from seismic_column.batch import run_batch_balanced
 from seismic_column.geometry import Geometry
 from seismic_column.io_schema import (
+    DIRECTIONS,
+    LONGITUDINAL,
+    TRANSVERSE,
     GlobalConfig,
     default_dataframe,
     in_frame,
@@ -70,20 +75,31 @@ def test_silo_softens_and_lengthens_the_period():
 # ---------------------------------------------------------------------------
 # The checks themselves
 # ---------------------------------------------------------------------------
-def _bent(name, k, m=1.0, frame="F1", order=0, T=None):
-    if T is None:
-        T = tuple(2.0 * math.pi * math.sqrt(m / ki) for ki in k)
+def _bent(name, k, m=1.0, frame="F1", order=0, m_trans=None,
+          deck_link="integral"):
+    """A bent with stiffness ``k`` per bound and mass ``m`` (both directions
+    unless ``m_trans`` differs)."""
     return BentStiffness(name=name, frame=frame, order=order, Hcol=240.0,
-                         silo=0.0, mass=m, k=tuple(k), T=tuple(T),
-                         bound_labels=("3D",) * len(k))
+                         silo=0.0, k=tuple(k), mass_long=m,
+                         mass_trans=m if m_trans is None else m_trans,
+                         deck_link=deck_link, bound_labels=("3D",) * len(k))
+
+
+def _long(checks, name=None):
+    """Longitudinal checks only — the two directions are identical in most
+    fixtures, so this keeps assertions about counts unambiguous."""
+    return [c for c in checks if c.direction == LONGITUDINAL
+            and (name is None or c.name == name)]
 
 
 def test_ratio_is_min_over_max_so_order_does_not_matter():
     crit = BalanceCriteria()
-    a, b = _bent("A", [10.0], order=0), _bent("B", [8.0], order=1)
-    fwd = balance_checks([a, b], crit)
-    rev = balance_checks([_bent("B", [8.0], order=0), _bent("A", [10.0], order=1)],
-                         crit)
+    fwd = _long(balance_checks([_bent("A", [10.0], order=0),
+                                _bent("B", [8.0], order=1)], crit),
+                STIFFNESS_CHECK)
+    rev = _long(balance_checks([_bent("B", [8.0], order=0),
+                                _bent("A", [10.0], order=1)], crit),
+                STIFFNESS_CHECK)
     assert fwd[0].ratio == pytest.approx(0.8)
     assert rev[0].ratio == pytest.approx(0.8)
     assert fwd[0].passed and rev[0].passed
@@ -92,29 +108,143 @@ def test_ratio_is_min_over_max_so_order_does_not_matter():
 def test_stiffness_check_fails_below_the_limit():
     checks = balance_checks([_bent("A", [10.0], order=0),
                              _bent("B", [5.0], order=1)], BalanceCriteria())
-    stiff = [c for c in checks if c.name == STIFFNESS_CHECK]
+    stiff = _long(checks, STIFFNESS_CHECK)
     assert stiff[0].ratio == pytest.approx(0.5)
     assert not stiff[0].passed
     assert stiff[0].limit == 0.75
 
 
 def test_period_ratio_is_the_square_root_of_the_kappa_ratio():
-    """With kappa = k/m and T = 2*pi*sqrt(m/k), (Ti/Tj)^2 = kappa_j/kappa_i."""
-    checks = balance_checks([_bent("A", [10.0], m=2.0, order=0),
-                             _bent("B", [6.0], m=2.0, order=1)],
-                            BalanceCriteria(mass_normalized=True))
-    rk = next(c.ratio for c in checks if c.name == STIFFNESS_CHECK)
-    rt = next(c.ratio for c in checks if c.name == GEOMETRY_CHECK)
-    assert rt == pytest.approx(math.sqrt(rk))
+    """With kappa = k/m and T = 2*pi*sqrt(m/k), (Ti/Tj)^2 = kappa_j/kappa_i.
+
+    The two rules now live at different levels — stiffness inside a frame,
+    geometry between frames — so they never land on the same pair.  Two
+    SINGLE-bent frames give the geometry check while the identity still holds
+    against the bents' own kappa.
+    """
+    crit = BalanceCriteria(mass_normalized=True)
+    a = _bent("A", [10.0], m=2.0, frame="F1", order=0)
+    b = _bent("B", [6.0], m=2.0, frame="F2", order=1)
+    checks = _long(balance_checks([a, b], crit))
+    assert {c.name for c in checks} == {GEOMETRY_CHECK}   # no within-frame rule
+    rt = checks[0].ratio
+    ka = a.kappa(LONGITUDINAL, 0, True)
+    kb = b.kappa(LONGITUDINAL, 0, True)
+    assert rt == pytest.approx(math.sqrt(min(ka, kb) / max(ka, kb)))
     # ... so the 0.75 stiffness rule is stricter than the 0.70 period rule
     assert math.sqrt(0.75) > 0.70
+
+
+# ---------------------------------------------------------------------------
+# Frames: derived per direction from deck_link
+# ---------------------------------------------------------------------------
+def _en_pattern():
+    """The EN bridge shape: simple spans, a continuous frame, simple spans."""
+    bents = []
+    for i, name in enumerate(["A6", "A7", "A8", "A9", "A10", "A11", "A12"]):
+        if name in ("A7", "A11"):
+            bents.append(_bent(name, [100.0], frame="C1", order=i,
+                               deck_link="bearing"))
+        elif name in ("A8", "A9", "A10"):
+            bents.append(_bent(name, [100.0], frame="C1", order=i,
+                               deck_link="integral"))
+        else:
+            bents.append(_bent(name, [100.0], frame=f"F{name}", order=i))
+    return bents
+
+
+def test_frames_differ_by_direction():
+    """A bearing released longitudinally but shear-keyed joins the continuous
+    frame transversely, and stands alone longitudinally."""
+    bents = _en_pattern()
+    lon = [f.names for f in frames_for(bents, LONGITUDINAL)]
+    tra = [f.names for f in frames_for(bents, TRANSVERSE)]
+    assert lon == [("A6",), ("A7",), ("A8", "A9", "A10"), ("A11",), ("A12",)]
+    assert tra == [("A6",), ("A7", "A8", "A9", "A10", "A11"), ("A12",)]
+    # ordered along the bridge either way
+    assert [f.order for f in frames_for(bents, LONGITUDINAL)] == sorted(
+        f.order for f in frames_for(bents, LONGITUDINAL))
+
+
+def test_free_deck_link_drops_out_entirely():
+    bents = [_bent("A", [10.0], frame="C1", order=0),
+             _bent("B", [10.0], frame="C1", order=1, deck_link="free")]
+    for d in DIRECTIONS:
+        assert [f.names for f in frames_for(bents, d)] == [("A",)]
+
+
+def test_frame_period_sums_stiffness_and_mass():
+    bents = [_bent("A", [100.0], m=2.0, frame="C1", order=0),
+             _bent("B", [300.0], m=4.0, frame="C1", order=1)]
+    f = frames_for(bents, LONGITUDINAL)[0]
+    assert f.continuous
+    assert f.K(0) == pytest.approx(400.0)
+    assert f.M() == pytest.approx(6.0)
+    assert f.T(0) == pytest.approx(2 * math.pi * math.sqrt(6.0 / 400.0))
+
+
+def test_single_bent_frame_period_equals_the_bents_own():
+    b = _bent("A", [120.0], m=3.0, frame="F1", order=0)
+    f = frames_for([b], LONGITUDINAL)[0]
+    assert not f.continuous
+    assert f.T(0) == pytest.approx(b.T(LONGITUDINAL, 0))
+
+
+def test_no_stiffness_rule_between_simply_supported_bents():
+    """The correction that started this: a run of simple spans is a run of
+    single-bent frames, so §7.1.2 has nothing to compare."""
+    bents = [_bent("A", [200.0], frame="F1", order=0),
+             _bent("B", [50.0], frame="F2", order=1)]   # ratio 0.25, way off
+    checks = balance_checks(bents, BalanceCriteria())
+    assert all(c.name == GEOMETRY_CHECK for c in checks)
+    assert not any(c.name in (STIFFNESS_CHECK, STIFFNESS_ANY_CHECK)
+                   for c in checks)
+
+
+def test_any_two_rule_catches_what_adjacent_misses():
+    """A gentle stiffness taper down one frame: every NEIGHBOUR is inside 0.75,
+    yet the two ends are outside 0.50 of each other.
+
+    It takes four bents — with three, 0.75 x 0.75 = 0.5625 is still above the
+    0.50 limit, so no three-bent frame can pass adjacent and fail any-two.
+    """
+    bents = [_bent("A", [100.0], frame="C1", order=0),
+             _bent("B", [78.0], frame="C1", order=1),
+             _bent("C", [61.0], frame="C1", order=2),
+             _bent("D", [48.0], frame="C1", order=3)]
+    checks = _long(balance_checks(bents, BalanceCriteria()))
+    adj = [c for c in checks if c.name == STIFFNESS_CHECK]
+    anyc = [c for c in checks if c.name == STIFFNESS_ANY_CHECK]
+    assert all(c.passed for c in adj), [c.label for c in adj if not c.passed]
+    # non-adjacent pairs only — an adjacent pair is also "any two", but its
+    # stricter 0.75 limit means the 0.50 check could never govern there
+    assert {c.pair for c in anyc} == {("A", "C"), ("A", "D"), ("B", "D")}
+    failed = [c for c in anyc if not c.passed]
+    assert [c.pair for c in failed] == [("A", "D")]
+    assert failed[0].limit == 0.50
+
+
+def test_direction_can_change_the_verdict():
+    """Same k, different tributary mass, so the period rule can pass one way and
+    fail the other."""
+    bents = [_bent("A", [100.0], m=1.0, m_trans=1.0, frame="F1", order=0),
+             _bent("B", [100.0], m=1.2, m_trans=4.0, frame="F2", order=1)]
+    checks = balance_checks(bents, BalanceCriteria())
+    lon = [c for c in checks if c.direction == LONGITUDINAL]
+    tra = [c for c in checks if c.direction == TRANSVERSE]
+    assert all(c.passed for c in lon)
+    assert not all(c.passed for c in tra)
 
 
 def test_mass_normalisation_changes_the_verdict():
     """Equal stiffness but unequal tributary mass fails the normalised form."""
     bents = [_bent("A", [10.0], m=1.0, order=0), _bent("B", [10.0], m=2.0, order=1)]
-    assert balance_checks(bents, BalanceCriteria(mass_normalized=False))[0].passed
-    assert not balance_checks(bents, BalanceCriteria(mass_normalized=True))[0].passed
+    off = _long(balance_checks(bents, BalanceCriteria(mass_normalized=False)),
+                STIFFNESS_CHECK)
+    on = _long(balance_checks(bents, BalanceCriteria(mass_normalized=True)),
+               STIFFNESS_CHECK)
+    assert off[0].passed
+    assert not on[0].passed
 
 
 def test_only_adjacent_pairs_within_a_frame_are_compared():
@@ -137,8 +267,8 @@ def test_frame_exclusion_markers():
 
 def test_unusable_stiffness_fails_rather_than_crashing():
     bents = [_bent("A", [float("nan")], order=0), _bent("B", [8.0], order=1)]
-    checks = balance_checks(bents, BalanceCriteria())
-    assert not checks[0].passed
+    checks = _long(balance_checks(bents, BalanceCriteria()))
+    assert checks and not checks[0].passed
     assert math.isnan(checks[0].ratio)
 
 
@@ -242,19 +372,39 @@ def test_below_past_the_whole_profile_still_resolves():
 # ---------------------------------------------------------------------------
 # Integration through the batch
 # ---------------------------------------------------------------------------
+@pytest.mark.slow
+def _uneven_df(n=3):
+    """A table that genuinely fails the FRAME-PERIOD rule.
+
+    The default table is simply supported (one frame per bent), so the only
+    rule in play is the adjacent-frame period ratio — and 18/22/26 ft passes it
+    comfortably.  These heights do not.
+    """
+    df = default_dataframe(n)
+    # far enough apart to fail the 0.70 period ratio, but still designable at
+    # the fixed 48 in diameter these fast tests use
+    df["Hcol_ft"] = [14.0, 22.0, 28.0, 20.0, 26.0][:n]
+    return df
+
+
 def test_default_table_is_unbalanced_before_any_silo():
-    df = default_dataframe(3)                  # 18 / 22 / 26 ft
+    df = _uneven_df(3)                  # 18 / 22 / 26 ft
     out = run_batch_balanced(df, _cfg(optimize=False, balance_auto_silo=False))
     assert out.balance is not None
     assert not out.balance.passed
     assert all(r.silo == 0.0 for r in out.results)      # nothing was changed
-    assert any(c.name == STIFFNESS_CHECK and not c.passed
+    # every frame holds one bent, so no stiffness rule applies at all — the
+    # frame-period rule is the only thing that can fail here
+    assert not any(c.name in (STIFFNESS_CHECK, STIFFNESS_ANY_CHECK)
+                   for c in out.balance.checks)
+    assert any(c.name == GEOMETRY_CHECK and not c.passed
                for c in out.balance.checks)
 
+@pytest.mark.slow
 
 @pytest.mark.parametrize("code", CODES)
 def test_auto_silo_balances_and_every_column_still_passes_seismic(code):
-    df = default_dataframe(3)
+    df = _uneven_df(3)
     out = run_batch_balanced(df, _cfg(code=code, balance_auto_silo=True))
     assert out.balance.passed, [c.label for c in out.balance.failed]
     assert out.balance.converged
@@ -271,12 +421,14 @@ def test_auto_silo_balances_and_every_column_still_passes_seismic(code):
         assert row["H_free_ft"] == pytest.approx(rr.assessment.H_free / 12.0,
                                                  abs=0.01)
         assert row["balanced"] == "PASS"
+        assert row["bal_T_long"] is not None and row["bal_T_trans"] is not None
 
 
+@pytest.mark.slow
 def test_a_silo_forces_a_real_seismic_re_analysis():
     """The pier that gets a silo must be re-analysed, not just re-labelled:
     Lp, the demands and (in an optimise run) the reinforcement all move."""
-    df = default_dataframe(3)
+    df = _uneven_df(3)
     stage1 = run_batch_balanced(df, _cfg(balance_auto_silo=False))
     final = run_batch_balanced(df, _cfg(balance_auto_silo=True))
 
@@ -299,6 +451,7 @@ def test_a_silo_forces_a_real_seismic_re_analysis():
             assert after.assessment.Lp == pytest.approx(before.assessment.Lp)
 
 
+@pytest.mark.slow
 def test_silo_actually_lengthens_the_analysed_column():
     df = default_dataframe(3)
     out = run_batch_balanced(df, _cfg(balance_auto_silo=True))
@@ -310,6 +463,7 @@ def test_silo_actually_lengthens_the_analysed_column():
         assert a.governing_bound.Le == pytest.approx(
             a.H_free + a.governing_bound.fixity_depth)
 
+@pytest.mark.slow
 
 @pytest.mark.parametrize("strategy", ["greedy", "min_silo"])
 def test_silo_cap_reports_instead_of_looping(strategy):
@@ -329,6 +483,7 @@ def test_silo_cap_reports_instead_of_looping(strategy):
     assert all(r.silo <= 1.0 * 12.0 + 1e-9 for r in out.results)
 
 
+@pytest.mark.slow
 def test_entered_silo_is_a_floor_never_reduced():
     df = default_dataframe(3)
     df.loc[2, "silo_ft"] = 3.0                 # the most flexible pier already
@@ -337,6 +492,7 @@ def test_entered_silo_is_a_floor_never_reduced():
     assert c3.silo >= 3.0 * 12.0 - 1e-9
 
 
+@pytest.mark.slow
 def test_entered_silo_deeper_than_the_cap_is_honoured():
     """The cap limits what the TOOL adds; a typed-in silo is the engineer's."""
     df = default_dataframe(3)
@@ -348,10 +504,11 @@ def test_entered_silo_deeper_than_the_cap_is_honoured():
                                                  + 8.0 * 12.0)
 
 
+@pytest.mark.slow
 def test_balance_progress_is_separate_from_the_row_progress_count():
     """``progress`` keeps its once-per-row contract; the balance stage reports
     through ``balance_progress`` instead of corrupting the done-count."""
-    df = default_dataframe(3)
+    df = _uneven_df(3)
     calls, msgs = [], []
     run_batch_balanced(
         df, _cfg(balance_auto_silo=True),
@@ -376,15 +533,20 @@ def test_silo_states_grid():
 
 
 def _dp(bents, k_table, criteria, states=None):
-    """Run the DP against an explicit {name: {silo: k}} table."""
-    from seismic_column.balance import dp_min_silo
+    """Run the DP against an explicit {name: {silo: k}} table.
+
+    The predicate is supplied by the caller now, so this mirrors what
+    ``_plan_silos_min`` does: neighbours must satisfy the pair rules.
+    """
+    from seismic_column.balance import dp_min_silo, pair_ok
 
     states = states or {n: tuple(sorted(v)) for n, v in k_table.items()}
-    return dp_min_silo(
-        bents, states,
-        k_of=lambda b, s, bound: k_table[b.name][s],
-        m_of=lambda b, s: b.mass,
-        criteria=criteria)
+
+    def feasible(bi, si, bj, sj):
+        return pair_ok(k_table[bi.name][si], k_table[bj.name][sj],
+                       bi.mass(LONGITUDINAL), bj.mass(LONGITUDINAL), criteria)
+
+    return dp_min_silo(bents, states, feasible)
 
 
 def test_dp_matches_brute_force():
@@ -428,15 +590,17 @@ def test_dp_matches_brute_force():
 
 
 def test_dp_respects_the_floor_and_the_cap():
-    from seismic_column.balance import dp_min_silo
+    from seismic_column.balance import dp_min_silo, pair_ok
 
     crit = BalanceCriteria(mass_normalized=True)
     grid_a, grid_b = (24.0, 36.0), (0.0, 12.0)       # P1 floored at 24 in
     k = {"P1": {24.0: 200.0, 36.0: 180.0}, "P2": {0.0: 190.0, 12.0: 170.0}}
     bents = [_bent("P1", [200.0], order=0), _bent("P2", [190.0], order=1)]
-    plan = dp_min_silo(bents, {"P1": grid_a, "P2": grid_b},
-                       k_of=lambda b, s, i: k[b.name][s],
-                       m_of=lambda b, s: b.mass, criteria=crit)
+    plan = dp_min_silo(
+        bents, {"P1": grid_a, "P2": grid_b},
+        lambda bi, si, bj, sj: pair_ok(k[bi.name][si], k[bj.name][sj],
+                                       bi.mass(LONGITUDINAL),
+                                       bj.mass(LONGITUDINAL), crit))
     assert plan.feasible
     assert plan.silos["P1"] >= 24.0                   # never below the floor
     assert all(v in k[n] for n, v in plan.silos.items())   # only grid points
@@ -464,6 +628,7 @@ def test_dp_treats_frames_independently():
     assert plan.silos["C"] == 0.0                       # nothing to balance against
 
 
+@pytest.mark.slow
 def test_min_silo_is_never_worse_than_greedy():
     """Both strategies converge to the same minimum — greedy is Gauss-Seidel on
     the same monotone fixed point, not a heuristic.  This pins that they agree,
@@ -478,6 +643,7 @@ def test_min_silo_is_never_worse_than_greedy():
     assert all(r.feasible for r in b.results)
 
 
+@pytest.mark.slow
 def test_min_silo_result_is_on_the_grid_and_verified():
     df = default_dataframe(3)
     out = run_batch_balanced(df, _cfg(balance_strategy="min_silo",
@@ -488,6 +654,7 @@ def test_min_silo_result_is_on_the_grid_and_verified():
         assert abs(ft / 2.0 - round(ft / 2.0)) < 1e-6, f"{rr.name} off-grid: {ft}"
 
 
+@pytest.mark.slow
 def test_identical_bounds_are_collapsed():
     """Equal stiff/soft brackets make evaluate_column run the same analysis
     twice; the balance layer must not double every check because of it."""
@@ -507,6 +674,7 @@ def test_identical_bounds_are_collapsed():
     assert len(out2.balance.checks) == 4
 
 
+@pytest.mark.slow
 def test_period_rule_alone_drives_a_silo():
     """Regression: with mass normalisation OFF the stiffness and period rules
     decouple, so the period rule can be the ONLY thing failing.  The silo
@@ -518,14 +686,15 @@ def test_period_rule_alone_drives_a_silo():
     # 1.000 and passes; only the tributary mass differs, and T = 2*pi*sqrt(m/k)
     # carries mass even when normalisation is off.
     df["Hcol_ft"] = 22.0
-    df["weight_kip"] = [900.0, 2050.0]
+    df["weight_long_kip"] = [900.0, 2050.0]
+    df["weight_trans_kip"] = [900.0, 2050.0]
     cfg = _cfg(optimize=False, balance_mass_normalized=False,
                balance_auto_silo=False)
     before = run_batch_balanced(df, cfg).balance
-    k_ok = [c for c in before.checks if c.name == STIFFNESS_CHECK]
+    # each bent is its own frame, so only the period rule is in play — and it
+    # carries mass through T = 2*pi*sqrt(m/k) even with normalisation off
     t_bad = [c for c in before.checks if c.name == GEOMETRY_CHECK]
-    assert all(c.passed for c in k_ok), "stiffness should pass on equal sections"
-    assert not all(c.passed for c in t_bad), "period should fail on unequal mass"
+    assert t_bad and not all(c.passed for c in t_bad),         "period should fail on unequal mass"
 
     after = run_batch_balanced(df, _cfg(optimize=False,
                                         balance_mass_normalized=False,
@@ -536,41 +705,6 @@ def test_period_rule_alone_drives_a_silo():
     assert silos["C1"] > 0 and silos["C2"] == 0
 
 
-def test_mass_ratio_window_bounds_the_two_rules():
-    """The two rules constrain the same k ratio from opposite sides."""
-    from seismic_column.balance import joint_feasible, mass_ratio_window
-
-    crit = BalanceCriteria(mass_normalized=False)          # 0.75 / 0.70
-    lo, hi = mass_ratio_window(crit)
-    assert lo == pytest.approx(0.75 * 0.70 ** 2)           # 0.3675
-    assert hi == pytest.approx(1.0 / (0.75 * 0.70 ** 2))   # 2.721
-
-    ok, mu, (x_lo, x_hi) = joint_feasible(
-        _bent("A", [100.0], m=1.0, order=0),
-        _bent("B", [100.0], m=1.9, order=1), crit)
-    assert ok and x_lo <= x_hi                              # mu 0.53, tight
-    bad, mu2, _ = joint_feasible(
-        _bent("A", [100.0], m=1.0, order=0),
-        _bent("B", [100.0], m=4.0, order=1), crit)[0:3]
-    assert not bad                                          # mu 0.25 < 0.3675
-
-    # mass normalisation ON makes the period rule automatic, so no window
-    assert mass_ratio_window(BalanceCriteria(mass_normalized=True))[1] == float("inf")
-
-
-def test_infeasible_mass_disparity_is_reported_not_ground_against():
-    """A pair outside the mass window can't be fixed by any silo — say so."""
-    df = default_dataframe(2)
-    df["Hcol_ft"] = 22.0
-    df["weight_kip"] = [700.0, 3200.0]            # ratio well past 2.72
-    out = run_batch_balanced(df, _cfg(optimize=False,
-                                      balance_mass_normalized=False,
-                                      balance_auto_silo=True))
-    assert not out.balance.passed
-    assert any("INFEASIBLE" in line for line in out.balance.log)
-    assert any("mass normalisation" in line for line in out.balance.log)
-
-
 def test_balance_check_off_runs_nothing():
     df = default_dataframe(3)
     out = run_batch_balanced(df, _cfg(optimize=False, balance_check=False))
@@ -579,22 +713,32 @@ def test_balance_check_off_runs_nothing():
     assert "balanced" not in out.summary.columns
 
 
+@pytest.mark.slow
 def test_excluded_piers_are_left_out_of_the_pairs():
     df = default_dataframe(3)
     df.loc[1, "frame"] = ""                    # C2 opts out
     out = run_batch_balanced(df, _cfg(optimize=False, balance_auto_silo=False))
+    # frames are single-bent here, so a frame key is the pier's own frame id
     pairs = {c.pair for c in out.balance.checks}
-    assert pairs == {("C1", "C3")}             # C2 removed, C1-C3 now adjacent
+    assert pairs == {("F1", "F3")}             # C2 removed, F1-F3 now adjacent
     assert out.summary.loc[out.summary["name"] == "C2", "balanced"].iloc[0] == "-"
 
 
-def test_separate_frames_are_never_compared():
+@pytest.mark.slow
+def test_stiffness_stays_inside_a_frame_but_geometry_crosses_it():
+    """Two continuous frames: the stiffness rule never reaches across the
+    boundary, but the frame-period rule is explicitly a BETWEEN-frames rule."""
     df = default_dataframe(4)
     df["frame"] = ["A", "A", "B", "B"]
     out = run_batch_balanced(df, _cfg(optimize=False, balance_auto_silo=False))
-    assert {c.pair for c in out.balance.checks} == {("C1", "C2"), ("C3", "C4")}
+    stiff = {c.pair for c in out.balance.checks
+             if c.name in (STIFFNESS_CHECK, STIFFNESS_ANY_CHECK)}
+    geom = {c.pair for c in out.balance.checks if c.name == GEOMETRY_CHECK}
+    assert stiff == {("C1", "C2"), ("C3", "C4")}      # within frames only
+    assert geom == {("A", "B")}                       # across the boundary
 
 
+@pytest.mark.slow
 def test_user_limit_may_only_be_stricter_than_the_code():
     df = default_dataframe(3)
     out = run_batch_balanced(df, _cfg(optimize=False, balance_auto_silo=False,
@@ -608,6 +752,53 @@ def test_user_limit_may_only_be_stricter_than_the_code():
 # ---------------------------------------------------------------------------
 # Schema / persistence
 # ---------------------------------------------------------------------------
+def test_legacy_table_migrates_to_simply_supported_frames():
+    """A pre-deck_link table used one frame id for every row, which under the
+    new rules would read as one giant continuous frame and start applying the
+    any-two rule.  Simply supported spans are the safe reading, and the
+    regrouping must be recorded rather than done silently."""
+    df = default_dataframe(3).drop(columns=["deck_link", "weight_trans_kip"])
+    df = df.rename(columns={"weight_long_kip": "weight_kip"})
+    df["frame"] = "F1"                         # the old default: all one frame
+    out = validate(df)
+    assert list(out["frame"]) == ["F1", "F2", "F3"]        # one frame per bent
+    assert list(out["deck_link"]) == ["integral"] * 3
+    assert (out["weight_trans_kip"] == out["weight_long_kip"]).all()
+    assert any("own frame" in m for m in out.attrs.get("migrations", []))
+
+
+def test_deck_link_is_validated():
+    df = default_dataframe(1)
+    df.loc[0, "deck_link"] = "welded"
+    with pytest.raises(ValueError, match="deck_link"):
+        validate(df)
+
+
+@pytest.mark.slow
+def test_continuous_frame_end_to_end():
+    """A continuous frame declared in the table produces within-frame stiffness
+    checks, one frame period, and direction-dependent membership."""
+    df = default_dataframe(5)
+    df["frame"] = ["FA", "C1", "C1", "C1", "FB"]
+    df["deck_link"] = ["integral", "bearing", "integral", "bearing", "integral"]
+    out = run_batch_balanced(df, _cfg(optimize=False, balance_auto_silo=False))
+    b = out.balance
+    lon = [f.names for f in b.frames[LONGITUDINAL]]
+    tra = [f.names for f in b.frames[TRANSVERSE]]
+    # C2/C4 are released longitudinally, so C3 is alone in the frame there
+    assert ("C3",) in lon and ("C2",) in lon and ("C4",) in lon
+    assert ("C2", "C3", "C4") in tra
+    # the stiffness rule fires only transversely, where the frame is continuous
+    assert not any(c.name in (STIFFNESS_CHECK, STIFFNESS_ANY_CHECK)
+                   for c in b.checks if c.direction == LONGITUDINAL)
+    assert any(c.name == STIFFNESS_CHECK
+               for c in b.checks if c.direction == TRANSVERSE)
+    # the exact search cannot handle a continuous frame and says so
+    out2 = run_batch_balanced(df, _cfg(optimize=False, balance_auto_silo=True,
+                                       balance_strategy="min_silo"))
+    assert any("fell back to pairwise repair" in m for m in out2.balance.log)
+
+
 def test_validate_backfills_frame_and_silo_for_older_tables():
     df = default_dataframe(2).drop(columns=["frame", "silo_ft"])
     out = validate(df)
@@ -646,6 +837,7 @@ def test_project_round_trip_keeps_frame_silo_and_balance_settings():
     assert cfg2.max_silo_ft == 15.0 and cfg2.silo_step_ft == 0.5
 
 
+@pytest.mark.slow
 def test_results_write_the_silo_back_into_the_table():
     from seismic_column.batch import results_to_dataframe
     df = default_dataframe(3)
@@ -659,13 +851,14 @@ def test_results_write_the_silo_back_into_the_table():
 # ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------
+@pytest.mark.slow
 def test_balance_report_is_complete_and_clean():
     from seismic_column.report import balance_report, column_report
-    df = default_dataframe(3)
+    df = _uneven_df(3)
     out = run_batch_balanced(df, _cfg(balance_auto_silo=True))
     txt = balance_report(out.balance)
     for heading in ("# Balanced stiffness & balanced frame geometry",
-                    "## Bents", "## Adjacent pairs", "## Balancing log"):
+                    "## Frames", "## Bents", "## Checks", "## Balancing log"):
         assert heading in txt
     assert "nan" not in txt and "None" not in txt
     # the per-column report must show the silo it was analysed with
