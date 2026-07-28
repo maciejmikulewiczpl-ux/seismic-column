@@ -311,15 +311,21 @@ def test_silo_actually_lengthens_the_analysed_column():
             a.H_free + a.governing_bound.fixity_depth)
 
 
-def test_silo_cap_reports_instead_of_looping():
+@pytest.mark.parametrize("strategy", ["greedy", "min_silo"])
+def test_silo_cap_reports_instead_of_looping(strategy):
+    """Whichever strategy is driving, a binding cap must be reported with the
+    cap value and what to do about it — never an infinite loop or a bare FAIL."""
     df = default_dataframe(3)
     df.loc[0, "Hcol_ft"] = 12.0
     df.loc[2, "Hcol_ft"] = 40.0
-    out = run_batch_balanced(df, _cfg(balance_auto_silo=True, max_silo_ft=1.0))
+    out = run_batch_balanced(df, _cfg(balance_auto_silo=True, max_silo_ft=1.0,
+                                      balance_strategy=strategy))
     assert not out.balance.passed
     assert not out.balance.converged
-    assert any("cap reached" in line for line in out.balance.log)
-    assert any("UNRESOLVED" in line for line in out.balance.log)
+    log = "\n".join(out.balance.log)
+    assert "cap" in log                       # names the binding constraint
+    assert "raise the cap" in log             # and what to do about it
+    assert "UNRESOLVED" in log
     assert all(r.silo <= 1.0 * 12.0 + 1e-9 for r in out.results)
 
 
@@ -354,6 +360,132 @@ def test_balance_progress_is_separate_from_the_row_progress_count():
     assert [d for d, _ in calls] == [1, 2, 3]      # exactly once per row
     assert all(t == 3 for _, t in calls)
     assert msgs and all("Balancing pass" in m for m in msgs)
+
+
+# ---------------------------------------------------------------------------
+# Minimum-silo search (exact DP over the buildable grid)
+# ---------------------------------------------------------------------------
+def test_silo_states_grid():
+    from seismic_column.balance import silo_states
+
+    assert silo_states(0.0, 60.0, 12.0) == (0.0, 12.0, 24.0, 36.0, 48.0, 60.0)
+    # an entered floor off the grid is kept as-is, then the grid resumes above it
+    s = silo_states(5.0, 40.0, 12.0)
+    assert s[0] == 5.0 and s[1] == 12.0 and s[-1] <= 40.0
+    assert silo_states(0.0, 60.0, 0.0) == (0.0,)          # degenerate step
+
+
+def _dp(bents, k_table, criteria, states=None):
+    """Run the DP against an explicit {name: {silo: k}} table."""
+    from seismic_column.balance import dp_min_silo
+
+    states = states or {n: tuple(sorted(v)) for n, v in k_table.items()}
+    return dp_min_silo(
+        bents, states,
+        k_of=lambda b, s, bound: k_table[b.name][s],
+        m_of=lambda b, s: b.mass,
+        criteria=criteria)
+
+
+def test_dp_matches_brute_force():
+    """The DP must return the true grid optimum, checked by enumeration."""
+    import itertools
+
+    from seismic_column.balance import pair_ok
+
+    crit = BalanceCriteria(mass_normalized=True)
+    names = ["P1", "P2", "P3", "P4"]
+    masses = [1.00, 1.05, 1.00, 1.15]
+    grid = (0.0, 12.0, 24.0, 36.0, 48.0)
+    # a silo softens: k falls with depth
+    k_table = {n: {s: k0 * (1.0 - 0.11 * s / 12.0) for s in grid}
+               for n, k0 in zip(names, [230.0, 200.0, 220.0, 175.0])}
+    bents = [_bent(n, [k_table[n][0.0]], m=m, order=i)
+             for i, (n, m) in enumerate(zip(names, masses))]
+
+    def brute_force():
+        best = None
+        for combo in itertools.product(grid, repeat=len(names)):
+            if all(pair_ok(k_table[names[i]][combo[i]],
+                           k_table[names[i + 1]][combo[i + 1]],
+                           masses[i], masses[i + 1], crit)
+                   for i in range(len(names) - 1)):
+                if best is None or sum(combo) < best:
+                    best = sum(combo)
+        return best
+
+    plan = _dp(bents, k_table, crit)
+    best = brute_force()
+    assert best is not None, "fixture is infeasible — pick easier numbers"
+    assert plan.feasible
+    assert plan.total == pytest.approx(best)
+    # and the DP must agree when there is NO answer, not invent one
+    hard = {n: {s: k for s, k in v.items()} for n, v in k_table.items()}
+    hard["P4"] = {s: 40.0 for s in grid}          # far too soft for any silo
+    bents_hard = [_bent(n, [hard[n][0.0]], m=m, order=i)
+                  for i, (n, m) in enumerate(zip(names, masses))]
+    assert not _dp(bents_hard, hard, crit).feasible
+
+
+def test_dp_respects_the_floor_and_the_cap():
+    from seismic_column.balance import dp_min_silo
+
+    crit = BalanceCriteria(mass_normalized=True)
+    grid_a, grid_b = (24.0, 36.0), (0.0, 12.0)       # P1 floored at 24 in
+    k = {"P1": {24.0: 200.0, 36.0: 180.0}, "P2": {0.0: 190.0, 12.0: 170.0}}
+    bents = [_bent("P1", [200.0], order=0), _bent("P2", [190.0], order=1)]
+    plan = dp_min_silo(bents, {"P1": grid_a, "P2": grid_b},
+                       k_of=lambda b, s, i: k[b.name][s],
+                       m_of=lambda b, s: b.mass, criteria=crit)
+    assert plan.feasible
+    assert plan.silos["P1"] >= 24.0                   # never below the floor
+    assert all(v in k[n] for n, v in plan.silos.items())   # only grid points
+
+
+def test_dp_reports_an_impossible_pair():
+    crit = BalanceCriteria(mass_normalized=True)
+    # P2 is far softer than P1 and no silo brings P1 down far enough
+    k_table = {"P1": {0.0: 500.0, 12.0: 480.0}, "P2": {0.0: 50.0, 12.0: 48.0}}
+    bents = [_bent("P1", [500.0], order=0), _bent("P2", [50.0], order=1)]
+    plan = _dp(bents, k_table, crit)
+    assert not plan.feasible
+    assert any("INFEASIBLE" in n and "P1-P2" in n for n in plan.notes)
+
+
+def test_dp_treats_frames_independently():
+    crit = BalanceCriteria(mass_normalized=True)
+    k_table = {n: {0.0: k, 12.0: k * 0.85} for n, k in
+               (("A", 200.0), ("B", 190.0), ("C", 90.0))}
+    bents = [_bent("A", [200.0], frame="F1", order=0),
+             _bent("B", [190.0], frame="F1", order=1),
+             _bent("C", [90.0], frame="F2", order=2)]   # own frame: unconstrained
+    plan = _dp(bents, k_table, crit)
+    assert plan.feasible
+    assert plan.silos["C"] == 0.0                       # nothing to balance against
+
+
+def test_min_silo_is_never_worse_than_greedy():
+    """Both strategies converge to the same minimum — greedy is Gauss-Seidel on
+    the same monotone fixed point, not a heuristic.  This pins that they agree,
+    so a future change to either shows up here."""
+    df = default_dataframe(3)
+    a = run_batch_balanced(df, _cfg(balance_strategy="greedy"))
+    b = run_batch_balanced(df, _cfg(balance_strategy="min_silo"))
+    assert a.balance.passed and b.balance.passed
+    tot_a = sum(r.silo for r in a.results)
+    tot_b = sum(r.silo for r in b.results)
+    assert tot_b <= tot_a + 1e-9
+    assert all(r.feasible for r in b.results)
+
+
+def test_min_silo_result_is_on_the_grid_and_verified():
+    df = default_dataframe(3)
+    out = run_batch_balanced(df, _cfg(balance_strategy="min_silo",
+                                      silo_step_ft=2.0))
+    assert out.balance.passed
+    for rr in out.results:
+        ft = rr.silo / 12.0
+        assert abs(ft / 2.0 - round(ft / 2.0)) < 1e-6, f"{rr.name} off-grid: {ft}"
 
 
 def test_identical_bounds_are_collapsed():

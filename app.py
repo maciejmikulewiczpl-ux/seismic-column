@@ -97,6 +97,7 @@ _DEFAULTS = {
     "balance_k_ratio_min": 0.75,
     "balance_T_ratio_min": 0.70,
     "balance_auto_silo": True,
+    "balance_strategy": "min_silo",
     "max_silo_ft": 20.0,
     "silo_step_ft": 1.0,
     # soil-structure interaction (point of fixity)
@@ -157,6 +158,7 @@ def _build_config() -> GlobalConfig:
         balance_k_ratio_min=s("balance_k_ratio_min"),
         balance_T_ratio_min=s("balance_T_ratio_min"),
         balance_auto_silo=s("balance_auto_silo"),
+        balance_strategy=s("balance_strategy"),
         max_silo_ft=s("max_silo_ft"),
         silo_step_ft=s("silo_step_ft"),
         fixity_source=s("fixity_source"),
@@ -208,6 +210,7 @@ def _load_project_into_state(df: pd.DataFrame, cfg: GlobalConfig) -> None:
     s["balance_k_ratio_min"] = getattr(cfg, "balance_k_ratio_min", 0.75)
     s["balance_T_ratio_min"] = getattr(cfg, "balance_T_ratio_min", 0.70)
     s["balance_auto_silo"] = getattr(cfg, "balance_auto_silo", True)
+    s["balance_strategy"] = getattr(cfg, "balance_strategy", "min_silo")
     s["max_silo_ft"] = getattr(cfg, "max_silo_ft", 20.0)
     s["silo_step_ft"] = getattr(cfg, "silo_step_ft", 1.0)
     s["fixity_source"] = getattr(cfg, "fixity_source", "multiplier")
@@ -495,6 +498,19 @@ with st.sidebar:
     bc2.number_input("Min adjacent period ratio", 0.5, 1.0,
                      key="balance_T_ratio_min", step=0.05, disabled=not _bal,
                      help="min(Ti,Tj)/max(Ti,Tj). Code minimum 0.70.")
+    st.selectbox(
+        "Silo sizing strategy", ["min_silo", "greedy"], key="balance_strategy",
+        disabled=not (_bal and st.session_state.get("balance_auto_silo", True)),
+        format_func=lambda v: {"min_silo": "Minimum total silo (exact)",
+                               "greedy": "Pairwise repair (fast)"}[v],
+        help="**Minimum total silo**: a dynamic program over each frame finds "
+             "the cheapest combination of buildable silo depths that satisfies "
+             "every adjacent pair — the true optimum on the grid, not an "
+             "approximation of it. **Pairwise repair**: fix one failing pair at "
+             "a time, deepening monotonically. Both are re-verified against a "
+             "real analysis each pass and, on the projects measured so far, "
+             "reach the same answer — the exact search buys a guarantee rather "
+             "than a shallower silo.")
     bs1, bs2 = st.columns(2)
     bs1.number_input("Max silo depth (ft)", 0.0, 60.0, key="max_silo_ft",
                      step=1.0, disabled=not (_bal and

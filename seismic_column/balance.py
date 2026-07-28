@@ -327,6 +327,145 @@ def joint_feasible(bi: BentStiffness, bj: BentStiffness,
     return (lo <= mu <= hi), mu, (x_lo, x_hi)
 
 
+# ---------------------------------------------------------------------------
+# Exact minimum-silo assignment
+# ---------------------------------------------------------------------------
+@dataclass
+class SiloPlan:
+    """Result of a silo search."""
+
+    silos: dict[str, float]                  # pier name -> silo depth, in
+    feasible: bool = True
+    notes: list[str] = field(default_factory=list)
+
+    @property
+    def total(self) -> float:
+        return sum(self.silos.values())
+
+    @property
+    def deepest(self) -> float:
+        return max(self.silos.values(), default=0.0)
+
+
+def silo_states(floor: float, cap: float, step: float) -> tuple[float, ...]:
+    """Buildable silo depths, in: ``floor`` then whole ``step``s up to ``cap``.
+
+    The floor (an entered ``silo_ft``) is always allowed even when it is not on
+    the grid — it is the engineer's number and must not be rounded away.
+    """
+    if step <= 0.0:
+        return (floor,)
+    out = [floor]
+    first = math.ceil(floor / step + 1e-9) * step
+    z = first
+    while z <= cap + 1e-9:
+        if z > floor + 1e-9:
+            out.append(z)
+        z += step
+    return tuple(out)
+
+
+def pair_ok(ki: float, kj: float, mi: float, mj: float,
+            criteria: BalanceCriteria) -> bool:
+    """Do two adjacent piers satisfy BOTH balance rules at this bound?"""
+    if not (math.isfinite(ki) and math.isfinite(kj)) or ki <= 0 or kj <= 0:
+        return False
+    ai = ki / mi if criteria.mass_normalized else ki
+    aj = kj / mj if criteria.mass_normalized else kj
+    if _ratio(ai, aj) < criteria.k_ratio_min:
+        return False
+    Ti = math.sqrt(mi / ki)                 # 2*pi cancels in the ratio
+    Tj = math.sqrt(mj / kj)
+    return _ratio(Ti, Tj) >= criteria.T_ratio_min
+
+
+def dp_min_silo(bents: list[BentStiffness], states: dict[str, tuple[float, ...]],
+                k_of, m_of, criteria: BalanceCriteria) -> SiloPlan:
+    """Minimum-total-silo assignment on the buildable grid — exact, per frame.
+
+    Silo depths are discrete (whole ``silo_step_ft`` increments up to the cap),
+    and the balance rules only ever couple *adjacent* piers.  A frame is
+    therefore a chain, and the cheapest feasible assignment over a chain is a
+    textbook dynamic program::
+
+        dp[i][s] = s + min over s' allowed by the pair (i-1, i) of dp[i-1][s']
+
+    That is the true optimum on the grid, not a relaxation of it — unlike the
+    pairwise repair, which fixes one failing pair at a time and pays for the
+    cascade that each local fix sets off in its neighbour.
+
+    ``k_of(bent, silo, bound) -> float`` and ``m_of(bent, silo) -> float`` supply
+    the predicted stiffness and mass at a trial depth; the caller is responsible
+    for calibrating them against a real analysis and iterating.
+
+    Cost is O(n · S² · bounds) — a few hundred thousand operations at worst.
+    Returns ``feasible=False`` with the offending pair named when some adjacent
+    pair admits no combination at all.
+    """
+    silos: dict[str, float] = {}
+    notes: list[str] = []
+    ok = True
+
+    groups: dict[str, list[BentStiffness]] = {}
+    for b in sorted(bents, key=lambda b: b.order):
+        groups.setdefault(b.frame, []).append(b)
+
+    for members in groups.values():
+        if len(members) == 1:                 # nothing to balance against
+            silos[members[0].name] = states[members[0].name][0]
+            continue
+        n = len(members)
+        st = [states[b.name] for b in members]
+        # dp[s] = (cost, backpointer) for the pier being processed
+        dp = [(s, -1) for s in st[0]]
+        back: list[list[int]] = []
+        for i in range(1, n):
+            bi, bj = members[i - 1], members[i]
+            n_bounds = min(len(bi.k), len(bj.k))
+            row, bp = [], []
+            for sj in st[i]:
+                best, arg = math.inf, -1
+                for a, si in enumerate(st[i - 1]):
+                    if dp[a][0] == math.inf:
+                        continue
+                    if all(pair_ok(k_of(bi, si, b), k_of(bj, sj, b),
+                                   m_of(bi, si), m_of(bj, sj), criteria)
+                           for b in range(n_bounds)):
+                        if dp[a][0] < best:
+                            best, arg = dp[a][0], a
+                row.append((best + sj if best < math.inf else math.inf, arg))
+                bp.append(arg)
+            back.append(bp)
+            dp = row
+            if all(c == math.inf for c, _ in dp):
+                ok = False
+                deepest = max(st[i - 1][-1], st[i][-1]) / 12.0
+                notes.append(
+                    f"INFEASIBLE — {bi.name}-{bj.name}: the {deepest:g} ft silo "
+                    f"cap is reached and no combination of buildable depths "
+                    f"satisfies both balance rules for this pair. A silo only "
+                    f"softens, so stiffen the more flexible pier (larger "
+                    f"column), rebalance their tributary masses, or raise the "
+                    f"cap.")
+                break
+        else:
+            end = min(range(len(dp)), key=lambda a: dp[a][0])
+            if dp[end][0] == math.inf:
+                ok = False
+            else:
+                idx = [0] * n
+                idx[n - 1] = end
+                for i in range(n - 1, 0, -1):
+                    idx[i - 1] = back[i - 1][idx[i]]
+                for i, b in enumerate(members):
+                    silos[b.name] = st[i][idx[i]]
+                continue
+        for i, b in enumerate(members):       # infeasible frame: leave at floor
+            silos.setdefault(b.name, st[i][0])
+
+    return SiloPlan(silos=silos, feasible=ok, notes=notes)
+
+
 def dedupe(lines: list[str]) -> list[str]:
     """Drop repeated lines, keeping first-seen order.
 

@@ -167,6 +167,14 @@ class GlobalConfig:
     balance_k_ratio_min: float = 0.75     # min(ki,kj)/max(ki,kj) for adjacent piers
     balance_T_ratio_min: float = 0.70     # min(Ti,Tj)/max(Ti,Tj) for adjacent piers
     balance_auto_silo: bool = True        # let the tool size column silos to comply
+    # How the silo depths are chosen:
+    #   "min_silo" — exact minimum TOTAL silo on the buildable grid (a dynamic
+    #                program over each frame), re-calibrated and verified each
+    #                pass.  Costs a little more analysis, gives the cheapest
+    #                buildable answer.
+    #   "greedy"   — repair one failing pair at a time, monotonically deepening.
+    #                Faster, but pays for the cascade each local fix sets off.
+    balance_strategy: str = "min_silo"
     max_silo_ft: float = 20.0             # cap on any silo depth
     silo_step_ft: float = 1.0             # silo depths quantised (rounded up) to this
     balance_max_outer: int = 6            # outer silo <-> seismic re-check iterations

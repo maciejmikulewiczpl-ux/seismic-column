@@ -19,15 +19,17 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+from . import G_IN_S2
 from .balance import (GEOMETRY_CHECK, STIFFNESS_CHECK, BalanceCriteria,
                       BalanceResult, BentStiffness, adjacent_pairs,
-                      balance_checks, bent_stiffness, dedupe, joint_feasible,
-                      quantise_silo, required_silo)
+                      balance_checks, bent_stiffness, dedupe, dp_min_silo,
+                      joint_feasible, quantise_silo, required_silo,
+                      silo_states, stiffness_at_silo)
 from .geometry import Geometry
 from .io_schema import GlobalConfig, build_soil_profile, in_frame, validate
 from .optimizer import ColumnDesign, OptimizeResult, OptimizeSpec, optimize_column
 from .provisions import get_provisions
-from .sdc_capacity import ColumnAssessment, evaluate_column
+from .sdc_capacity import ColumnAssessment, column_self_weight, evaluate_column
 
 
 @dataclass
@@ -378,6 +380,58 @@ def _plan_silos(bents: list[BentStiffness], results: dict[str, RowResult],
     return silos, dedupe(notes)
 
 
+def _plan_silos_min(bents: list[BentStiffness], results: dict[str, RowResult],
+                    criteria: BalanceCriteria, cfg: GlobalConfig,
+                    floors: dict[str, float]) -> tuple[dict[str, float], list[str]]:
+    """Minimum-total-silo plan (exact on the buildable grid).
+
+    Builds a predicted stiffness/mass table over every allowed silo depth using
+    the elastic two-segment cantilever at the pier's current EI, **calibrated**
+    so it reproduces the stiffness actually measured at the pier's current silo.
+    That correction matters in soil mode, where lengthening the column also
+    re-derives the point of fixity from the p-y solve, so the raw elastic
+    formula over-predicts how much a silo softens.  The caller verifies the plan
+    with a real analysis and re-calibrates, so a poor prediction costs a pass,
+    never a wrong answer.
+    """
+    cap = cfg.max_silo_ft * 12.0
+    step = cfg.silo_step_ft * 12.0
+    # States start at the ENTERED floor, not at the current trial depth: a
+    # minimiser must be free to take a silo back off once a better-calibrated
+    # pass shows less is needed.  (The greedy repair is deliberately monotone;
+    # this is not.)
+    states = {b.name: silo_states(floors.get(b.name, 0.0), cap, step)
+              for b in bents}
+
+    # per-pier calibration factor: measured k / elastic k, at the current silo
+    corr: dict[str, float] = {}
+    for b in bents:
+        rr = results[b.name]
+        ke = stiffness_at_silo(Geometry(Hcol=b.Hcol, D_shaft=rr.shaft.D),
+                               rr.assessment.EI_col, rr.assessment.EI_shaft,
+                               rr.assessment.bounds[0].multiplier, b.silo)
+        corr[b.name] = (b.k[0] / ke) if ke > 0 else 1.0
+
+    def k_of(b: BentStiffness, silo: float, bound: int) -> float:
+        rr = results[b.name]
+        return corr[b.name] * stiffness_at_silo(
+            Geometry(Hcol=b.Hcol, D_shaft=rr.shaft.D),
+            rr.assessment.EI_col, rr.assessment.EI_shaft,
+            rr.assessment.bounds[bound].multiplier, silo)
+
+    def m_of(b: BentStiffness, silo: float) -> float:
+        # a deeper silo lengthens the column, so its self-weight participation
+        # grows — small, but it lowers kappa and raises T, so ignoring it would
+        # make the predictor optimistic
+        rr = results[b.name]
+        dW = column_self_weight(rr.design.section().Ag, silo - b.silo,
+                                cfg.concrete_unit_weight)
+        return b.mass + cfg.self_weight_mass_factor * dW / G_IN_S2
+
+    plan = dp_min_silo(bents, states, k_of, m_of, criteria)
+    return plan.silos, plan.notes
+
+
 def _balance_stage(results: list[RowResult], rows_by_name: dict[str, pd.Series],
                    order: dict[str, int], cfg: GlobalConfig,
                    on_candidate=None, on_status=None) -> BalanceResult:
@@ -438,15 +492,30 @@ def _balance_stage(results: list[RowResult], rows_by_name: dict[str, pd.Series],
     floors = {rr.name: float(rows_by_name[rr.name].get("silo_ft", 0.0) or 0.0) * 12.0
               for rr in results}
 
+    minimise = cfg.balance_strategy == "min_silo"
+    planner = _plan_silos_min if minimise else _plan_silos
+    if minimise:
+        log.append("Silo strategy: minimum total depth (exact on the buildable "
+                   f"{cfg.silo_step_ft:g} ft grid, per frame), verified against "
+                   "a real analysis each pass.")
+    # the cheapest FEASIBLE state seen, so a later refinement pass can never
+    # leave the run worse off than one it already had
+    best: tuple[float, list[RowResult], list, list] | None = None
+
     for outer in range(1, max(cfg.balance_max_outer, 1) + 1):
-        silos, notes = _plan_silos(bents, by_name, criteria, cfg, floors)
+        silos, notes = planner(bents, by_name, criteria, cfg, floors)
         changed = [n for n, h in silos.items()
                    if abs(h - by_name[n].silo) > 1e-6]
         log.extend(n for n in notes if n not in log)   # same cap note each pass
         if not changed:
-            log.append(f"Pass {outer}: no further silo change is available — "
-                       "stopping.")
-            result.converged = False
+            if result.passed:
+                log.append(f"Pass {outer}: the plan is unchanged — settled at "
+                           f"{sum(r.silo for r in results) / 12:g} ft total.")
+                result.converged = True
+            else:
+                log.append(f"Pass {outer}: no further silo change is available — "
+                           "stopping.")
+                result.converged = False
             break
         for name in changed:
             old = by_name[name].silo
@@ -478,17 +547,39 @@ def _balance_stage(results: list[RowResult], rows_by_name: dict[str, pd.Series],
         checks = balance_checks(bents, criteria)
         result.bents, result.checks = bents, checks
         if result.passed:
-            log.append(f"Balanced after {outer} silo pass"
-                       f"{'es' if outer > 1 else ''}.")
+            total = sum(r.silo for r in results)
+            if best is None or total < best[0] - 1e-9:
+                best = (total, list(results), list(bents), list(checks))
+            log.append(f"Pass {outer}: balanced at {total / 12:g} ft of silo "
+                       f"over {sum(1 for r in results if r.silo > 0)} pier(s).")
+            if not minimise:
+                result.converged = True
+                break
+            # keep going: the next pass re-calibrates the predictor against the
+            # stiffness just measured, which can find a cheaper plan.  The loop
+            # exits above when the plan stops changing.
             result.converged = True
-            break
     else:
-        log.append(f"Still unbalanced after {cfg.balance_max_outer} passes — "
-                   "the silo and the seismic re-design are fighting each other "
-                   "(a deeper silo raises the demands, which grows the section, "
-                   "which stiffens it again). Stiffen the flexible pier or "
-                   "relax the geometry.")
-        result.converged = False
+        if not result.passed:
+            log.append(
+                f"Still unbalanced after {cfg.balance_max_outer} passes — the "
+                "silo and the seismic re-design are fighting each other (a "
+                "deeper silo raises the demands, which grows the section, which "
+                "stiffens it again). Stiffen the flexible pier or relax the "
+                "geometry.")
+            result.converged = False
+
+    if best is not None:
+        # restore the cheapest feasible state, in case a refinement pass ended
+        # somewhere more expensive or broke feasibility outright
+        total_now = sum(r.silo for r in results)
+        if not result.passed or total_now > best[0] + 1e-9:
+            results[:] = best[1]
+            result.bents, result.checks = best[2], best[3]
+            by_name = {rr.name: rr for rr in results}
+            log.append(f"Kept the cheapest feasible plan found: "
+                       f"{best[0] / 12:g} ft of silo.")
+        result.converged = True
 
     if not result.passed:
         for c in result.failed:
