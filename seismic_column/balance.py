@@ -277,6 +277,46 @@ def required_silo(geometry: Geometry, EI_col: float, EI_shaft: float,
     return hi
 
 
+def mass_ratio_window(criteria: BalanceCriteria) -> tuple[float, float]:
+    """Adjacent tributary-mass ratios for which BOTH rules can hold at once.
+
+    Only meaningful when mass normalisation is OFF.  With ``kappa = k`` the two
+    rules constrain the same quantity ``x = k_i/k_j`` from opposite directions::
+
+        stiffness :  L_k <= x <= 1/L_k
+        period    :  T_i/T_j = sqrt(mu/x)  with  mu = m_i/m_j
+                     L_T <= sqrt(mu/x) <= 1/L_T   ->   mu*L_T^2 <= x <= mu/L_T^2
+
+    Those two windows overlap only while ``L_k*L_T^2 <= mu <= 1/(L_k*L_T^2)`` —
+    at the code limits, a factor of 2.72.  Outside it the pair cannot satisfy
+    both clauses at ANY stiffness, so no silo (indeed no column change of any
+    kind) will fix it: the tributary masses themselves have to move, or mass
+    normalisation has to be switched on.
+
+    With normalisation ON this can never bite — the kappa rule then implies the
+    period rule — so the window is unbounded.
+    """
+    if criteria.mass_normalized:
+        return (0.0, float("inf"))
+    f = criteria.k_ratio_min * criteria.T_ratio_min ** 2
+    return (f, 1.0 / f)
+
+
+def joint_feasible(bi: BentStiffness, bj: BentStiffness,
+                   criteria: BalanceCriteria) -> tuple[bool, float, tuple[float, float]]:
+    """``(feasible, mass_ratio, allowed_k_ratio_window)`` for one adjacent pair."""
+    lo, hi = mass_ratio_window(criteria)
+    if bj.mass <= 0 or bi.mass <= 0:
+        return True, float("nan"), (criteria.k_ratio_min, 1.0 / criteria.k_ratio_min)
+    mu = bi.mass / bj.mass
+    if criteria.mass_normalized:
+        return True, mu, (criteria.k_ratio_min, 1.0 / criteria.k_ratio_min)
+    t2 = criteria.T_ratio_min ** 2
+    x_lo = max(criteria.k_ratio_min, mu * t2)
+    x_hi = min(1.0 / criteria.k_ratio_min, mu / t2)
+    return (lo <= mu <= hi), mu, (x_lo, x_hi)
+
+
 def dedupe(lines: list[str]) -> list[str]:
     """Drop repeated lines, keeping first-seen order.
 

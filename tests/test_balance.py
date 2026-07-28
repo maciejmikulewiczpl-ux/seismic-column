@@ -342,6 +342,70 @@ def test_balance_progress_is_separate_from_the_row_progress_count():
     assert msgs and all("Balancing pass" in m for m in msgs)
 
 
+def test_period_rule_alone_drives_a_silo():
+    """Regression: with mass normalisation OFF the stiffness and period rules
+    decouple, so the period rule can be the ONLY thing failing.  The silo
+    planner used to watch stiffness alone and would report "no further silo
+    change is available" while a fix was in reach (found on the A7-A8 pair of
+    the EN project)."""
+    df = default_dataframe(2)
+    # identical sections and heights -> identical k, so the stiffness ratio is
+    # 1.000 and passes; only the tributary mass differs, and T = 2*pi*sqrt(m/k)
+    # carries mass even when normalisation is off.
+    df["Hcol_ft"] = 22.0
+    df["weight_kip"] = [900.0, 2050.0]
+    cfg = _cfg(optimize=False, balance_mass_normalized=False,
+               balance_auto_silo=False)
+    before = run_batch_balanced(df, cfg).balance
+    k_ok = [c for c in before.checks if c.name == STIFFNESS_CHECK]
+    t_bad = [c for c in before.checks if c.name == GEOMETRY_CHECK]
+    assert all(c.passed for c in k_ok), "stiffness should pass on equal sections"
+    assert not all(c.passed for c in t_bad), "period should fail on unequal mass"
+
+    after = run_batch_balanced(df, _cfg(optimize=False,
+                                        balance_mass_normalized=False,
+                                        balance_auto_silo=True))
+    assert after.balance.passed, [c.label for c in after.balance.failed]
+    # the LIGHTER pier has the shorter period, so it is the one softened
+    silos = {r.name: r.silo for r in after.results}
+    assert silos["C1"] > 0 and silos["C2"] == 0
+
+
+def test_mass_ratio_window_bounds_the_two_rules():
+    """The two rules constrain the same k ratio from opposite sides."""
+    from seismic_column.balance import joint_feasible, mass_ratio_window
+
+    crit = BalanceCriteria(mass_normalized=False)          # 0.75 / 0.70
+    lo, hi = mass_ratio_window(crit)
+    assert lo == pytest.approx(0.75 * 0.70 ** 2)           # 0.3675
+    assert hi == pytest.approx(1.0 / (0.75 * 0.70 ** 2))   # 2.721
+
+    ok, mu, (x_lo, x_hi) = joint_feasible(
+        _bent("A", [100.0], m=1.0, order=0),
+        _bent("B", [100.0], m=1.9, order=1), crit)
+    assert ok and x_lo <= x_hi                              # mu 0.53, tight
+    bad, mu2, _ = joint_feasible(
+        _bent("A", [100.0], m=1.0, order=0),
+        _bent("B", [100.0], m=4.0, order=1), crit)[0:3]
+    assert not bad                                          # mu 0.25 < 0.3675
+
+    # mass normalisation ON makes the period rule automatic, so no window
+    assert mass_ratio_window(BalanceCriteria(mass_normalized=True))[1] == float("inf")
+
+
+def test_infeasible_mass_disparity_is_reported_not_ground_against():
+    """A pair outside the mass window can't be fixed by any silo — say so."""
+    df = default_dataframe(2)
+    df["Hcol_ft"] = 22.0
+    df["weight_kip"] = [700.0, 3200.0]            # ratio well past 2.72
+    out = run_batch_balanced(df, _cfg(optimize=False,
+                                      balance_mass_normalized=False,
+                                      balance_auto_silo=True))
+    assert not out.balance.passed
+    assert any("INFEASIBLE" in line for line in out.balance.log)
+    assert any("mass normalisation" in line for line in out.balance.log)
+
+
 def test_balance_check_off_runs_nothing():
     df = default_dataframe(3)
     out = run_batch_balanced(df, _cfg(optimize=False, balance_check=False))
