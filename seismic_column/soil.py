@@ -144,10 +144,12 @@ class SoilProfile:
     J: float = 0.5                         # Matlock/stiff-clay bearing factor
     cyclic: bool = True                    # seismic -> cyclic p-y branches
     stiffness_factor: float = 1.0          # scales p (and Es) for upper/lower bounds
-    # Overburden already present at z = 0, ksi.  Non-zero only for a profile
-    # returned by :meth:`below` (a column silo lowers the top of shaft, but the
-    # soil outside the silo is intact and still presses down).
-    sigma_v0: float = 0.0
+    # Depth of the pile head below the ORIGINAL ground line, in.  Non-zero only
+    # for a profile returned by :meth:`below` — a column silo lowers the top of
+    # shaft into the ground.  Every depth argument below is measured from the
+    # pile head; the p-y formulae are evaluated at ``z + surface_offset``, the
+    # true depth in intact ground.  See :meth:`below` for why.
+    surface_offset: float = 0.0
     # cumulative layer-top depths (in), filled on init
     _tops: tuple[float, ...] = field(init=False, default=())
 
@@ -159,28 +161,43 @@ class SoilProfile:
         object.__setattr__(self, "_tops", tuple(tops))
 
     @property
-    def depth(self) -> float:
-        """Total profiled depth, in."""
+    def total_depth(self) -> float:
+        """Profiled depth from the original ground line, in."""
         return sum(lyr.thickness for lyr in self.layers)
+
+    @property
+    def depth(self) -> float:
+        """Profiled depth remaining below the pile head, in."""
+        return max(self.total_depth - self.surface_offset, 0.0)
 
     def signature(self) -> tuple:
         """Hashable summary of the profile (for caching pile solves)."""
         return (self.J, self.cyclic, round(self.stiffness_factor, 6),
-                round(self.sigma_v0, 10)) + tuple(
+                round(self.surface_offset, 6)) + tuple(
             (l.py_model, round(l.thickness, 4), round(l.gamma_eff, 12),
              round(l.su_top, 8), round(l.su_bot, 8), round(l.eps50, 6),
              round(l.phi, 4), round(l.k_py, 10)) for l in self.layers)
 
+    def _abs(self, z: float) -> float:
+        """Depth below the ORIGINAL ground line for a pile-head depth ``z``."""
+        return z + self.surface_offset
+
     def layer_at(self, z: float) -> tuple[SoilLayer, float]:
-        """Return (layer, depth-below-its-top) for global depth ``z`` (in)."""
+        """Return (layer, depth-below-its-top) for pile-head depth ``z`` (in)."""
+        return self._layer_at_abs(self._abs(z))
+
+    def _layer_at_abs(self, za: float) -> tuple[SoilLayer, float]:
         for lyr, top in zip(self.layers, self._tops):
-            if z < top + lyr.thickness or lyr is self.layers[-1]:
-                return lyr, z - top
-        return self.layers[-1], z - self._tops[-1]
+            if za < top + lyr.thickness or lyr is self.layers[-1]:
+                return lyr, za - top
+        return self.layers[-1], za - self._tops[-1]
 
     def sigma_v_eff(self, z: float) -> float:
-        """Effective vertical (overburden) stress at depth ``z`` (in), ksi."""
-        s, remaining = self.sigma_v0, z
+        """Effective overburden stress at pile-head depth ``z`` (in), ksi."""
+        return self._sigma_v_abs(self._abs(z))
+
+    def _sigma_v_abs(self, za: float) -> float:
+        s, remaining = 0.0, za
         for lyr in self.layers:
             dz = min(remaining, lyr.thickness)
             if dz <= 0.0:
@@ -192,69 +209,71 @@ class SoilProfile:
         return s
 
     def below(self, depth: float) -> "SoilProfile":
-        """The same profile seen from a surface ``depth`` (in) lower down.
+        """The same profile with the pile head ``depth`` (in) further down.
 
-        Used for a **column silo**: the silo void lowers the top of shaft by its
-        depth, so the shaft's p-y springs start that far into the strata.  The
-        top ``depth`` of layers is stripped (splitting the partially consumed
-        layer, interpolating ``su``), and the overburden it carried is retained
-        in :attr:`sigma_v0` — the soil around the silo is intact and still
-        presses down.  The near-surface wedge terms (which key off ``z``)
-        restart at the bottom of the silo, which is the conservative and
-        conventional isolation-casing treatment.
+        Used for a **column silo**: the silo void lowers the top of shaft, so
+        the shaft's springs start that far into the strata.  The profile itself
+        is untouched — only the reference level moves — so every p-y term is
+        evaluated at the pile's TRUE depth in intact ground: the overburden, the
+        undrained strength gradient, the ``J*z/D`` near-surface wedge term, the
+        sand subgrade modulus ``k*z``, all of it.
+
+        That is the right model when the silo is narrower than the shaft it
+        caps, which is the normal case here — a casing sized around the column
+        sits inside the enlarged Type II shaft below it, so the soil resisting
+        the shaft head laterally is intact and a failure wedge would break out
+        through full-depth ground rather than into the void.
+
+        (The alternative — treating the silo bottom as a fresh free surface, so
+        the wedge term restarts there — suits a wide open excavation.  It costs
+        roughly a third of the resistance at the shaft head and is not what a
+        narrow isolation casing does.)
 
         Returns ``self`` for ``depth <= 0``.
         """
         if depth <= 0.0 or not self.layers:
             return self
-        kept: list[SoilLayer] = []
-        remaining = depth
-        for lyr in self.layers:
-            if remaining >= lyr.thickness:             # wholly above the new surface
-                remaining -= lyr.thickness
-                continue
-            if remaining > 0.0:                        # partially consumed
-                kept.append(replace(
-                    lyr, thickness=lyr.thickness - remaining,
-                    su_top=lyr.su_at(remaining)))
-                remaining = 0.0
-            else:
-                kept.append(lyr)
-        if not kept:      # silo deeper than the profile: extend the bottom layer
-            kept = [replace(self.layers[-1], su_top=self.layers[-1].su_bot)]
-        return SoilProfile(layers=tuple(kept), J=self.J, cyclic=self.cyclic,
-                           stiffness_factor=self.stiffness_factor,
-                           sigma_v0=self.sigma_v_eff(depth))
+        return replace(self, surface_offset=self.surface_offset + depth)
 
     # ------------------------------------------------------------------
+    # Public depths are measured from the PILE HEAD; the private ``_abs``
+    # variants take the true depth below the original ground line.  The shift
+    # happens exactly once, on the way in, so nothing double-counts a silo.
+    # ------------------------------------------------------------------
     def p_ult(self, z: float, D: float) -> float:
-        """Ultimate soil resistance per unit length at depth ``z``, kip/in."""
-        lyr, zl = self.layer_at(z)
+        """Ultimate soil resistance per unit length at pile-head depth ``z``."""
+        return self._p_ult_abs(self._abs(z), D)
+
+    def _p_ult_abs(self, za: float, D: float) -> float:
+        lyr, zl = self._layer_at_abs(za)
         if lyr.py_model in ELASTIC_MODELS:
             return float("inf")                        # linear, no cap
-        sv = self.sigma_v_eff(z)
+        sv = self._sigma_v_abs(za)
         if lyr.is_clay:
             su = max(lyr.su_at(zl), 1e-9)
-            Np = min(3.0 + sv / su + self.J * z / D, 9.0)
+            Np = min(3.0 + sv / su + self.J * za / D, 9.0)
             return Np * su * D
-        return _sand_pu(lyr.phi, D, z, sv)
+        return _sand_pu(lyr.phi, D, za, sv)
 
     def p_of_y(self, z: float, y: float, D: float) -> float:
-        """Soil reaction ``p`` (kip/in) at depth ``z`` for deflection ``y`` (in)."""
+        """Soil reaction ``p`` (kip/in) at pile-head depth ``z``, deflection ``y``."""
+        return self._p_of_y_abs(self._abs(z), y, D)
+
+    def _p_of_y_abs(self, za: float, y: float, D: float) -> float:
         y = abs(y)
-        lyr, zl = self.layer_at(z)
+        lyr, zl = self._layer_at_abs(za)
         if lyr.py_model == "elastic_subgrade":
             base = lyr.k_py * y                         # k_py = constant Es
         else:
-            pu = self.p_ult(z, D)
+            pu = self._p_ult_abs(za, D)
             if lyr.py_model == "matlock_soft_clay":
-                base = _matlock(pu, y, D, lyr.eps50, z,
+                base = _matlock(pu, y, D, lyr.eps50, za,
                                 self._matlock_XR(lyr, zl, D), self.cyclic)
             elif lyr.py_model == "welch_stiff_clay":
                 base = _welch_stiff(pu, y, D, lyr.eps50)
             elif lyr.py_model == "api_sand":
-                A = 0.9 if self.cyclic else max(3.0 - 0.8 * z / D, 0.9)
-                base = _api_sand(pu, y, lyr.k_py, z, A)
+                A = 0.9 if self.cyclic else max(3.0 - 0.8 * za / D, 0.9)
+                base = _api_sand(pu, y, lyr.k_py, za, A)
             else:
                 raise ValueError(lyr.py_model)
         return self.stiffness_factor * base
@@ -265,22 +284,27 @@ class SoilProfile:
         As ``y`` -> 0 returns the initial tangent so the assembled system stays
         well-conditioned.
         """
+        za = self._abs(z)
         y = abs(y)
         if y < 1e-9:
-            return self._initial_modulus(z, D)
-        return self.p_of_y(z, y, D) / y
+            return self._initial_modulus_abs(za, D)
+        return self._p_of_y_abs(za, y, D) / y
 
     def _initial_modulus(self, z: float, D: float) -> float:
-        lyr, zl = self.layer_at(z)
+        return self._initial_modulus_abs(self._abs(z), D)
+
+    def _initial_modulus_abs(self, za: float, D: float) -> float:
+        lyr, zl = self._layer_at_abs(za)
         if lyr.py_model == "elastic_subgrade":
             return max(self.stiffness_factor * lyr.k_py, 1e-6)   # constant Es
         if lyr.py_model == "api_sand":
-            return max(self.stiffness_factor * lyr.k_py * z, 1e-6)  # k*z
+            return max(self.stiffness_factor * lyr.k_py * za, 1e-6)  # k*z
         # clay: initial slope of the (y/yc)^(1/n) curve is infinite at y=0;
         # use the secant at a small reference deflection (0.1*yc) instead.
         y50 = 2.5 * lyr.eps50 * D
         y_ref = 0.1 * y50
-        return self.p_of_y(z, y_ref, D) / y_ref        # already scaled
+        # _abs variant: ``za`` is already absolute, so must NOT shift again
+        return self._p_of_y_abs(za, y_ref, D) / y_ref   # already scaled
 
     def _matlock_XR(self, lyr: SoilLayer, zl: float, D: float) -> float:
         su = max(lyr.su_at(zl), 1e-9)

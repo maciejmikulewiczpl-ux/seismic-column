@@ -499,6 +499,21 @@ def balance_report(balance) -> str:
         "cantilever at cracked stiffness EI = Mp/φy — the same k that drives "
         "each pier's displacement demand.")
     add("")
+    add("**m** is the tributary mass the codes call for, and is the same mass "
+        "that sets the period and the displacement demand, so "
+        "(Ti/Tj)² = κj/κi holds exactly. It is")
+    add("")
+    add("- the entered tributary weight (superstructure over the tributary "
+        "span + cap), **plus**")
+    add("- the column self-weight over the free length H_free, at the "
+        "participation factor set in the settings (default 1/3, the usual "
+        "cantilever modal approximation) — so lengthening a column with a silo "
+        "also adds a little mass, which lowers κ and raises T,")
+    add("- **excluding** the embedded shaft below the top of shaft: that mass "
+        "is restrained by the surrounding soil and does not participate in the "
+        "sway mode. It is not negligible in absolute terms, so treat its "
+        "exclusion as a modelling assumption, not a rounding.")
+    add("")
     n_b = max((len(b.k) for b in balance.bents), default=0)
     hdr = ("| Pier | Frame | Hcol (ft) | Silo (ft) | H_free (ft) | m (kip·s²/in) |"
            + "".join(f" k [{balance.bents[0].label(i)}] (kip/in) |"

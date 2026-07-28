@@ -199,30 +199,44 @@ def test_below_zero_is_the_same_profile():
     assert p.below(-5.0) is p
 
 
-def test_below_keeps_the_overburden_continuous():
+def test_below_shifts_the_reference_level_only():
+    """A silo moves the pile head down; the ground itself is unchanged, so every
+    p-y term must be read at the TRUE depth in intact soil."""
     p = _profile()
     h = 5.0 * 12.0
     q = p.below(h)
+    assert q.layers == p.layers                # profile untouched
+    assert q.surface_offset == pytest.approx(h)
+    assert q.depth == pytest.approx(p.depth - h)
+    assert q.total_depth == pytest.approx(p.total_depth)
     for z in (0.0, 12.0, 120.0, 400.0):
         assert q.sigma_v_eff(z) == pytest.approx(p.sigma_v_eff(z + h))
+        assert q.p_ult(z, 84.0) == pytest.approx(p.p_ult(z + h, 84.0))
+        assert q.p_of_y(z, 0.5, 84.0) == pytest.approx(p.p_of_y(z + h, 0.5, 84.0))
+        assert (q.secant_modulus(z, 0.5, 84.0)
+                == pytest.approx(p.secant_modulus(z + h, 0.5, 84.0)))
+        assert q.layer_at(z)[0] is p.layer_at(z + h)[0]
 
 
-def test_below_strips_and_splits_layers():
+def test_silo_does_not_discard_the_near_surface_wedge():
+    """Regression: the first implementation stripped the strata and restarted z
+    at the silo bottom, which threw away the J*z/D wedge term and cost ~1/3 of
+    the resistance at the shaft head.  A casing narrower than the shaft leaves
+    that soil intact, so resistance must be at least the intact-ground value."""
     p = _profile()
-    q = p.below(5.0 * 12.0)                    # 5 ft into the 20 ft clay
-    assert q.depth == pytest.approx(p.depth - 60.0)
-    assert q.layers[0].py_model == "matlock_soft_clay"
-    assert q.layers[0].thickness == pytest.approx(15.0 * 12.0)
-    # su interpolated to the new surface (1.0 -> 1.5 ksf over 20 ft, at 5 ft)
-    assert q.layers[0].su_top == pytest.approx(p.layers[0].su_at(60.0))
-    q2 = p.below(25.0 * 12.0)                  # past the clay, into the sand
-    assert q2.layers[0].py_model == "api_sand"
+    h = 10.0 * 12.0
+    q = p.below(h)
+    # at the shaft head, the silo'd pile sees the full 10 ft of confinement
+    assert q.p_ult(0.0, 118.0) == pytest.approx(p.p_ult(h, 118.0))
+    assert q.p_ult(0.0, 118.0) > p.p_ult(0.0, 118.0)
 
 
-def test_below_past_the_whole_profile_keeps_a_layer():
-    q = _profile().below(500.0 * 12.0)
-    assert q.layers                            # never empty
-    assert q.signature() != _profile().signature()
+def test_below_past_the_whole_profile_still_resolves():
+    p = _profile()
+    q = p.below(500.0 * 12.0)
+    assert q.depth == 0.0                      # nothing left below the head
+    assert q.layer_at(0.0)[0] is p.layers[-1]  # extends the bottom layer
+    assert q.signature() != p.signature()
 
 
 # ---------------------------------------------------------------------------

@@ -517,8 +517,10 @@ def evaluate_column(
         raise ValueError("shaft_moment_basis must be 'interface' or 'fixity'")
 
     # A column silo lowers the top of shaft, so the shaft's p-y springs start
-    # that far into the strata; the embedded length is unchanged (the tip goes
-    # deeper).  ``below`` retains the stripped overburden.  No-op without a silo.
+    # that far into the strata and every p-y term is evaluated at the pile's
+    # TRUE depth in intact ground (overburden, su gradient, the J*z/D wedge
+    # term, the sand k*z modulus).  The embedded length is unchanged — the tip
+    # goes deeper.  No-op without a silo.
     if soil_profile is not None:
         soil_profile = soil_profile.below(geometry.silo)
 
