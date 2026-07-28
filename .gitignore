@@ -5,3 +5,7 @@ node_modules/
 # Licensed reference documents and their extracted text - never commit
 *.pdf
 refs/
+
+# Live project data - keep engineering files out of the repo unless
+# deliberately added (seismic_project (1).json is a checked-in sample)
+seismic_project_EN.json
