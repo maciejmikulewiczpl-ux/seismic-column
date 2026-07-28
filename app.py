@@ -722,6 +722,35 @@ if "summary" in st.session_state:
                      + ("" if balance.converged else
                         " The silo search did not converge — see the log."))
 
+        # A silo lengthens the free column, which changes Lp, the displacement
+        # demand, Vo, Vp and P-Delta — so every siloed pier was re-run through
+        # the FULL seismic suite.  That re-verification is the whole point of
+        # the coupling, so state it plainly rather than leaving it implicit in
+        # the status column.
+        siloed = [r for r in results if r.silo > 0]
+        if siloed:
+            bad = [r for r in siloed if not r.feasible]
+            detail = ", ".join(
+                f"{r.name} {r.assessment.Hcol_entered/12:.0f}→"
+                f"{r.assessment.H_free/12:.0f} ft"
+                f"{'' if r.feasible else ' ⚠️'}" for r in siloed)
+            msg = (f"**Seismic re-verification:** {len(siloed)} pier(s) carry a "
+                   f"silo and were re-analysed over the lengthened free column "
+                   f"— {detail}. ")
+            if bad:
+                st.warning(msg + f"**{len(bad)} now FAIL** their seismic checks: "
+                                 + "; ".join(f"{r.name} ("
+                                             + ", ".join(c.name for c in
+                                                         r.assessment.checks
+                                                         if not c.passed) + ")"
+                                             for r in bad))
+            else:
+                st.info(msg + "All still pass the full seismic check suite at "
+                              "the lengthened length.")
+        elif balance.checks:
+            st.info("**Seismic re-verification:** no silo was needed, so no "
+                    "pier was re-analysed.")
+
         if balance.bents:
             bent_rows = []
             for b in balance.bents:
@@ -769,7 +798,10 @@ if "summary" in st.session_state:
                 col.pyplot(figb)
 
         if balance.log:
-            with st.expander("Balancing log (what the silo search did)"):
+            # open by default whenever the tool changed a design or failed —
+            # the user needs to see what was altered on their behalf.
+            with st.expander("Balancing log (what the silo search did)",
+                             expanded=bool(siloed) or not balance.passed):
                 for entry in balance.log:
                     st.markdown(f"- {entry}")
 

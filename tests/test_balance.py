@@ -249,11 +249,40 @@ def test_auto_silo_balances_and_every_column_still_passes_seismic(code):
     for rr in out.results:
         assert rr.feasible, (rr.name,
                              [c.name for c in rr.assessment.checks if not c.passed])
-    # the summary reports the design that was finally checked
+    # the summary reports the design that was finally checked, at the length it
+    # was checked at
     for rr in out.results:
         row = out.summary[out.summary["name"] == rr.name].iloc[0]
         assert row["silo_ft"] == pytest.approx(rr.silo / 12.0, abs=0.01)
+        assert row["H_free_ft"] == pytest.approx(rr.assessment.H_free / 12.0,
+                                                 abs=0.01)
         assert row["balanced"] == "PASS"
+
+
+def test_a_silo_forces_a_real_seismic_re_analysis():
+    """The pier that gets a silo must be re-analysed, not just re-labelled:
+    Lp, the demands and (in an optimise run) the reinforcement all move."""
+    df = default_dataframe(3)
+    stage1 = run_batch_balanced(df, _cfg(balance_auto_silo=False))
+    final = run_batch_balanced(df, _cfg(balance_auto_silo=True))
+
+    siloed = [(a, b) for a, b in zip(stage1.results, final.results) if b.silo > 0]
+    assert siloed, "expected the default table to need a silo"
+    for before, after in siloed:
+        # Lp = 0.08*H_free + ... so it MUST grow with the silo
+        assert after.assessment.Lp > before.assessment.Lp
+        assert after.assessment.H_free == pytest.approx(
+            before.assessment.H_free + after.silo)
+        # the self-weight is taken over the longer column too
+        assert after.assessment.W_self > before.assessment.W_self
+        # and the checks were genuinely re-evaluated at the new length
+        assert after.feasible
+
+    # a pier that got no silo is left completely alone
+    for before, after in zip(stage1.results, final.results):
+        if after.silo == 0.0:
+            assert after.design.long_label() == before.design.long_label()
+            assert after.assessment.Lp == pytest.approx(before.assessment.Lp)
 
 
 def test_silo_actually_lengthens_the_analysed_column():

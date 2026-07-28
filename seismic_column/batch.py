@@ -484,6 +484,8 @@ def _summary_row(rr: RowResult, balance: BalanceResult | None = None) -> dict:
         "feasible": rr.feasible,
         "status": "PASS" if rr.feasible else "FAIL",
         "silo_ft": round(rr.silo / 12.0, 2),
+        # the length the checks were actually run at (Hcol + silo)
+        "H_free_ft": round(a.H_free / 12.0, 2),
         "Dcol_in": d.D,
         "fc_ksi": d.fc,
         "long": d.long_label(),
