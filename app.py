@@ -6,16 +6,19 @@ Run with:
 from __future__ import annotations
 
 import io
+import math
 import os
 import subprocess
 import sys
 import time
 
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 import numpy as np
 import pandas as pd
 import streamlit as st
 
+from seismic_column.balance import GEOMETRY_CHECK, STIFFNESS_CHECK
 from seismic_column.batch import (RowResult, results_to_dataframe,
                                   run_batch_balanced)
 from seismic_column.demand import SpectrumSpec
@@ -695,6 +698,142 @@ if st.button("Run batch", type="primary"):
 
 
 # ---------------------------------------------------------------------------
+# Balance plots
+# ---------------------------------------------------------------------------
+# Pass/fail is a STATUS encoding.  Failures are the signal and compliant pairs
+# are context, so only the failures get a saturated colour (status "critical");
+# passing marks stay recessive grey.  That is also the accessible choice: the
+# obvious red/green pair separates by only deutan ΔE 4.1 — a deuteranope sees
+# one colour — whereas critical-vs-grey separates by 9.1, clearing the ≥8 bar,
+# because it differs in chroma rather than hue.  Colour still never carries the
+# verdict alone: failing marks are dashed/hatched, labelled "✗ <ratio>", and the
+# same numbers sit in the checks table above.
+_BAD = "#d03b3b"                        # status: critical
+_INK, _MUTED, _GRID = "#52514e", "#898781", "#e1e0d9"
+_OK = _MUTED                            # compliant = recessive, not green
+
+
+def _bound_status(balance, check_name: str) -> dict:
+    """{(pier_i, pier_j, bound_index): BalanceCheck} for one check type."""
+    labels = balance.bents[0].bound_labels if balance.bents else ()
+    at = {lbl: i for i, lbl in enumerate(labels)}
+    return {(c.pair[0], c.pair[1], at.get(c.bound, 0)): c
+            for c in balance.checks if c.name == check_name}
+
+
+def _profile_fig(bents, value_of, ylabel, status):
+    """Metric along the bridge, with each adjacent LINK drawn pass/fail.
+
+    Piers are markers; the link between adjacent piers is the thing being
+    checked, so it carries the verdict.  Piers in different frames are simply
+    not linked, which makes frame boundaries visible.
+    """
+    fig, ax = plt.subplots(figsize=(5.4, 3.4))
+    idx = {b.name: i for i, b in enumerate(bents)}
+    n_bounds = min((len(b.k) for b in bents), default=0)
+
+    for (ni, nj, bnd), c in sorted(status.items(), key=lambda kv: kv[0][2]):
+        if ni not in idx or nj not in idx:
+            continue
+        xi, xj = idx[ni], idx[nj]
+        yi, yj = value_of(bents[xi], bnd), value_of(bents[xj], bnd)
+        ax.plot([xi, xj], [yi, yj],
+                color=_BAD if not c.passed else _OK,
+                ls="--" if not c.passed else "-",           # not colour alone
+                lw=2.0, zorder=2, solid_capstyle="round")
+        if not c.passed:                                     # label only failures
+            # stagger by bound: the bound lines converge at the flexible end,
+            # so a fixed offset collides there.
+            dy = 9 if bnd % 2 == 0 else -14
+            mid_y = math.sqrt(yi * yj) if min(yi, yj) > 0 else (yi + yj) / 2
+            ax.annotate(f"✗ {c.ratio:.2f}", ((xi + xj) / 2, mid_y),
+                        textcoords="offset points", xytext=(0, dy),
+                        ha="center", fontsize=8, color=_BAD, fontweight="bold",
+                        bbox=dict(boxstyle="round,pad=0.15", fc="white",
+                                  ec="none", alpha=0.85), zorder=4)
+
+    marks = ["o", "s", "^"]
+    for bnd in range(n_bounds):
+        ys = [value_of(b, bnd) for b in bents]
+        ax.plot(range(len(bents)), ys, ls="none", marker=marks[bnd % len(marks)],
+                ms=8, mfc="white", mec=_INK, mew=1.4, zorder=3,
+                label=bents[0].label(bnd))
+
+    ax.set_xticks(range(len(bents)))
+    ax.set_xticklabels([b.name for b in bents])
+    ax.set_xlabel("pier (in table order)")
+    # The check is a RATIO, so a log axis makes it read directly: the same ratio
+    # is the same vertical distance anywhere on the plot, and a stiff short pier
+    # no longer squashes its flexible neighbours into the baseline.
+    vals = [value_of(b, i) for b in bents for i in range(n_bounds)]
+    if vals and min(vals) > 0 and max(vals) / min(vals) > 8.0:
+        ax.set_yscale("log")
+        ylabel += "  (log)"
+        # plain engineering numbers, not 6x10^1
+        fmt = mticker.FuncFormatter(
+            lambda v, _p: f"{v:,.0f}" if v >= 1 else f"{v:,.2g}")
+        ax.yaxis.set_major_formatter(fmt)
+        ax.yaxis.set_minor_formatter(fmt)
+        ax.tick_params(axis="y", which="minor", labelsize=7)
+    ax.set_ylabel(ylabel)
+    ax.grid(axis="y", color=_GRID, lw=0.8, which="both")
+    ax.set_axisbelow(True)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    for side in ("left", "bottom"):
+        ax.spines[side].set_color(_GRID)
+    ax.tick_params(colors=_MUTED)
+    if n_bounds >= 2:
+        ax.legend(fontsize=8, frameon=False)
+    fig.tight_layout()
+    return fig
+
+
+def _ratio_fig(checks, limit, title):
+    """Every adjacent-pair ratio against its limit — the 'which ones fail' chart."""
+    fig, ax = plt.subplots(figsize=(5.4, max(2.2, 0.42 * len(checks) + 1.2)))
+    labels = [f"{c.pair[0]}–{c.pair[1]}  [{c.bound}]" for c in checks]
+    ys = range(len(checks))
+    for y, c in zip(ys, checks):
+        r = 0.0 if np.isnan(c.ratio) else c.ratio
+        ax.barh(y, r, height=0.5, zorder=2,
+                color=_OK if c.passed else _BAD,
+                alpha=0.55 if c.passed else 0.85,
+                hatch="" if c.passed else "///",         # not colour alone
+                edgecolor="white", linewidth=0.0)
+        ax.annotate(("n/a" if np.isnan(c.ratio)
+                     else f"{'✗ ' if not c.passed else ''}{c.ratio:.3f}"),
+                    (r, y), textcoords="offset points", xytext=(6, 0),
+                    va="center", fontsize=8, color=_BAD if not c.passed else _INK,
+                    fontweight="bold" if not c.passed else "normal")
+    ax.axvline(limit, color=_INK, lw=1.2, zorder=3)
+    # Anchor to the x-axis transform (data x, axes-fraction y): the data y-axis
+    # is inverted, so a data-y here lands off-canvas.  Sits just INSIDE the top
+    # of the plot so it never collides with the title.
+    ax.annotate(f"limit {limit:.2f}", xy=(limit, 1.0),
+                xycoords=ax.get_xaxis_transform(),
+                textcoords="offset points", xytext=(5, -11), fontsize=8,
+                color=_INK, zorder=4,
+                bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="none",
+                          alpha=0.85))
+    ax.set_yticks(list(ys))
+    ax.set_yticklabels(labels, fontsize=8)
+    ax.invert_yaxis()                       # first pair on the bridge at the top
+    ax.set_xlim(0, max(1.05, max((c.ratio for c in checks
+                                 if not np.isnan(c.ratio)), default=1.0) * 1.15))
+    ax.set_xlabel("min / max  (1.00 = perfectly matched)")
+    ax.set_title(title, fontsize=10, color=_INK)
+    ax.grid(axis="x", color=_GRID, lw=0.8)
+    ax.set_axisbelow(True)
+    for side in ("top", "right", "left"):
+        ax.spines[side].set_visible(False)
+    ax.spines["bottom"].set_color(_GRID)
+    ax.tick_params(colors=_MUTED)
+    fig.tight_layout()
+    return fig
+
+
+# ---------------------------------------------------------------------------
 # Results
 # ---------------------------------------------------------------------------
 if "summary" in st.session_state:
@@ -777,25 +916,39 @@ if "summary" in st.session_state:
                 "values": c.note,
             } for c in balance.checks]), width="stretch")
 
-            # κ and T along the bridge, per frame
+            # --- along the bridge: each adjacent LINK drawn pass/fail ---
+            k_status = _bound_status(balance, STIFFNESS_CHECK)
+            t_status = _bound_status(balance, GEOMETRY_CHECK)
+            st.markdown(
+                f"**Along the bridge.** Markers are piers, one per fixity "
+                f"bound; the line between two piers is the adjacent-pair check "
+                f"itself — plain grey where it complies, dashed red with "
+                f"`✗ ratio` where it does not. Unlinked neighbours are in "
+                f"different frames.")
             bk1, bk2 = st.columns(2)
-            for col, (vals, ylabel, limit_txt) in (
-                    (bk1, ([b.kappa(0, cr.mass_normalized) for b in balance.bents],
-                           f"κ = {cr.kappa_symbol} [{balance.bents[0].label(0)}]",
-                           f"adjacent ratio ≥ {cr.k_ratio_min:.2f}")),
-                    (bk2, ([b.T[0] for b in balance.bents],
-                           f"T (s) [{balance.bents[0].label(0)}]",
-                           f"adjacent ratio ≥ {cr.T_ratio_min:.2f}"))):
-                figb, axb = plt.subplots()
-                axb.step(range(len(balance.bents)), vals, where="mid",
-                         marker="o", lw=1.5)
-                axb.set_xticks(range(len(balance.bents)))
-                axb.set_xticklabels([b.name for b in balance.bents])
-                axb.set_xlabel("pier (in table order)")
-                axb.set_ylabel(ylabel)
-                axb.set_title(limit_txt)
-                axb.grid(alpha=0.3)
-                col.pyplot(figb)
+            bk1.pyplot(_profile_fig(
+                balance.bents,
+                lambda b, i: b.kappa(i, cr.mass_normalized),
+                f"κ = {cr.kappa_symbol}", k_status))
+            bk2.pyplot(_profile_fig(
+                balance.bents, lambda b, i: b.T[i], "T (s)", t_status))
+
+            # --- the ratios themselves against their limits ---
+            k_checks = [c for c in balance.checks if c.name == STIFFNESS_CHECK]
+            t_checks = [c for c in balance.checks if c.name == GEOMETRY_CHECK]
+            n_bad = sum(1 for c in balance.checks if not c.passed)
+            st.markdown(
+                f"**Every adjacent pair against its limit.** Bars left of the "
+                f"limit line fail"
+                + (f" — {n_bad} of {len(balance.checks)} here." if n_bad
+                   else " — none do here."))
+            rb1, rb2 = st.columns(2)
+            if k_checks:
+                rb1.pyplot(_ratio_fig(k_checks, cr.k_ratio_min,
+                                      "Balanced stiffness (SDC 7.1.2 / SGS 4.1.2)"))
+            if t_checks:
+                rb2.pyplot(_ratio_fig(t_checks, cr.T_ratio_min,
+                                      "Balanced frame geometry (SDC 7.1.3 / SGS 4.1.3)"))
 
         if balance.log:
             # open by default whenever the tool changed a design or failed —
