@@ -49,7 +49,7 @@ _PY_REF = "Matlock (1970); API RP-2A / O'Neill–Murchison (1983); Reese et al. 
 def _add_fixity_source(add, a) -> None:
     """Explain how the point of fixity was obtained (manual multiplier or p-y),
     in the same symbolic-then-numeric style as the other detailed calcs."""
-    Hcol = a.bounds[0].Le - a.bounds[0].fixity_depth
+    H_free = a.H_free or (a.bounds[0].Le - a.bounds[0].fixity_depth)
     soil_bounds = [b for b in a.bounds if b.soil_solution is not None]
     is_ct = a.provisions.shear_model == "caltrans"
     # AASHTO LRFD equivalent-fixity equations, adopted by Caltrans as AASHTO-CA BDS
@@ -106,24 +106,24 @@ def _add_fixity_source(add, a) -> None:
     add("")
 
     # --- (ii) applied pile-head forces, clearly prescribed ---
-    Fy = a.mc_col.Mp / Hcol
-    Vo = a.Mo / Hcol
+    Fy = a.mc_col.Mp / H_free
+    Vo = a.Mo / H_free
     add("**Applied pile-head forces** — a lateral point load is applied at the "
-        "**column top**; the moment at the top of shaft (= V·Hcol) then arises "
+        "**column top**; the moment at the top of shaft (= V·H_free) then arises "
         "from the continuous beam, so the shaft carries **both** shear and the "
         "column overturning moment:")
-    _eq(add, "F_y  (stiffness / fixity solve)", "Mp / Hcol",
-        f"{a.mc_col.Mp:.0f}/{Hcol:.0f}",
+    _eq(add, "F_y  (stiffness / fixity solve)", "Mp / H_free",
+        f"{a.mc_col.Mp:.0f}/{H_free:.0f}",
         f"{Fy:.0f} kip  → develops Mp = {a.mc_col.Mp/12:.0f} kip-ft at top of shaft")
-    _eq(add, "Vo  (in-ground shaft-design solve)", "Mo / Hcol",
-        f"{a.Mo:.0f}/{Hcol:.0f}",
+    _eq(add, "Vo  (in-ground shaft-design solve)", "Mo / H_free",
+        f"{a.Mo:.0f}/{H_free:.0f}",
         f"{Vo:.0f} kip  → develops Mo = {a.Mo/12:.0f} kip-ft (overstrength) at top of shaft")
     add("")
 
     # --- (iii) equivalent depth-to-fixity per soil bound ---
     add("**Equivalent depth-to-fixity** per soil-stiffness bound "
         "(f_soil = y_head / F_y from the p-y solve; Df_eq inverts the cantilever "
-        "flexibility f = Hcol³/3EI_col + ((Hcol+Df)³ − Hcol³)/3EI_shaft):")
+        "flexibility f = H_free³/3EI_col + ((H_free+Df)³ − H_free³)/3EI_shaft):")
     for b in soil_bounds:
         s = b.soil_solution
         if not s.stable:
@@ -163,7 +163,7 @@ def _add_fixity_source(add, a) -> None:
             "the **secant** modulus at the actual head force F_y; (2) Davisson's "
             "depth is calibrated to match a *shear-loaded* pile-head deflection, "
             "whereas the p-y Df_eq reproduces the full head flexibility including "
-            "the column overturning moment V·Hcol; (3) the closed form collapses "
+            "the column overturning moment V·H_free; (3) the closed form collapses "
             "the layered profile to one equivalent modulus, the p-y solve honors "
             "each layer; (4) the ×2/×0.5 modulus bracket on Df_eq spans the soil "
             "stiffness uncertainty the single closed-form value cannot capture. "
@@ -339,6 +339,27 @@ def column_report(rr: RowResult) -> str:
     add(f"**Design code:** {a.provisions.name}")
     add("")
 
+    add("## Geometry")
+    add("")
+    add(f"- Entered column height Hcol = {a.Hcol_entered/12:.1f} ft "
+        f"({a.Hcol_entered:.0f} in)")
+    if a.silo > 0:
+        add(f"- Column silo (isolation casing) = {a.silo/12:.1f} ft "
+            f"({a.silo:.0f} in) — lowers the top of shaft by this much")
+        add(f"- **Free column length H_free = Hcol + silo = "
+            f"{a.H_free/12:.1f} ft ({a.H_free:.0f} in)**  "
+            f"&nbsp;*[{a.provisions.ref_balance_tuning}]*")
+        add("  All mechanics below (Lp, self-weight, Δy, Δp, Vo, Vp, P-Δ, the "
+            "L/Dc aspect ratio and the bond bar-diameter limit) use H_free; the "
+            "plastic hinge stays at the top of shaft, i.e. the bottom of the "
+            "silo.  The embedded shaft length is unchanged, so the tip goes "
+            "deeper, and the p-y springs start at the bottom of the silo.")
+    else:
+        add(f"- No column silo, so the free column length H_free = Hcol = "
+            f"{a.H_free/12:.1f} ft")
+    add(f"- Shaft diameter D_shaft = {s.D:.0f} in")
+    add("")
+
     add("## Column section")
     add("")
     add(f"- Diameter: {d.D:.0f} in")
@@ -425,6 +446,105 @@ def column_report(rr: RowResult) -> str:
     return "\n".join(lines)
 
 
+def balance_report(balance) -> str:
+    """Markdown calc sheet for the adjacent-pier balance checks.
+
+    ``balance`` is a :class:`~seismic_column.balance.BalanceResult`.  Covers the
+    whole run, not one column, so it is a separate document from
+    :func:`column_report`.
+    """
+    cr = balance.criteria
+    kap = cr.kappa_symbol
+    lines: list[str] = []
+    add = lines.append
+
+    add("# Balanced stiffness & balanced frame geometry")
+    add("")
+    add(f"**Result:** {'PASS ✅' if balance.passed else 'FAIL ❌'}"
+        + ("" if balance.converged else "  —  *did not converge*"))
+    add("")
+    add("**Scope.** The piers below carry **simply supported spans in series**, "
+        "so each pier is strictly its own single-bent frame. They are treated "
+        "as one frame of bents so that the **adjacent**-bent stiffness rule "
+        "applies between neighbouring piers, together with the adjacent-frame "
+        "period rule. The any-two-bents rule (0.50) is **not** applied. "
+        "Adjacency is table row order within each `frame` group; a pier with a "
+        "blank `frame` is excluded.")
+    add("")
+    add("**Criteria.**")
+    _chk(add, "Balanced stiffness (adjacent bents)",
+         f"min(κi, κj) / max(κi, κj) ≥ {cr.k_ratio_min:.2f},  κ = {kap}",
+         f"evaluated at every fixity bound, like-for-like (stiff-vs-stiff, "
+         f"soft-vs-soft)", ref=cr.ref_stiffness)
+    _chk(add, "Balanced frame geometry (adjacent frames)",
+         f"min(Ti, Tj) / max(Ti, Tj) ≥ {cr.T_ratio_min:.2f}",
+         "T is the effective (cracked) period already used for the "
+         "displacement demand", ref=cr.ref_geometry)
+    add("")
+    if cr.mass_normalized:
+        add(f"*Note:* with κ = k/m and T = 2π√(m/k), (Ti/Tj)² = κj/κi, so a "
+            f"stiffness ratio of {cr.k_ratio_min:.2f} gives a period ratio of "
+            f"√{cr.k_ratio_min:.2f} = {math.sqrt(cr.k_ratio_min):.3f} ≥ "
+            f"{cr.T_ratio_min:.2f}. The balanced-stiffness rule therefore "
+            "*implies* the balanced-geometry rule here; both are reported "
+            "because they are separately named clauses.")
+    else:
+        add("*Note:* κ = k (the constant-width form), so the stiffness and "
+            "period rules are independent checks.")
+    add("")
+
+    add("## Bents")
+    add("")
+    add("k is the effective lateral stiffness of the two-segment equivalent "
+        "cantilever at cracked stiffness EI = Mp/φy — the same k that drives "
+        "each pier's displacement demand.")
+    add("")
+    n_b = max((len(b.k) for b in balance.bents), default=0)
+    hdr = ("| Pier | Frame | Hcol (ft) | Silo (ft) | H_free (ft) | m (kip·s²/in) |"
+           + "".join(f" k [{balance.bents[0].label(i)}] (kip/in) |"
+                     f" T [{balance.bents[0].label(i)}] (s) |" for i in range(n_b)))
+    add(hdr)
+    add("|:--|:--|--:|--:|--:|--:|" + "--:|--:|" * n_b)
+    for b in balance.bents:
+        row = (f"| {b.name} | {b.frame} | {b.Hcol/12:.1f} | {b.silo/12:.1f} | "
+               f"{b.H_free/12:.1f} | {b.mass:.3f} |")
+        for i in range(n_b):
+            row += (f" {b.k[i]:.2f} |" if i < len(b.k) else " — |")
+            row += (f" {b.T[i]:.3f} |" if i < len(b.T) else " — |")
+        add(row)
+    add("")
+
+    add("## Adjacent pairs")
+    add("")
+    if not balance.checks:
+        add("*No adjacent pairs to check* — fewer than two piers take part "
+            "(see the `frame` column).")
+    else:
+        add("| Check | Pair | Bound | Ratio | Limit | Status | Values |")
+        add("|:--|:--|:--|--:|--:|:--|:--|")
+        for c in balance.checks:
+            ratio = "—" if math.isnan(c.ratio) else f"{c.ratio:.3f}"
+            add(f"| {c.name} | {c.pair[0]}–{c.pair[1]} | {c.bound} | {ratio} | "
+                f"{c.limit:.2f} | {'OK ✅' if c.passed else 'NG ❌'} | {c.note} |")
+    add("")
+
+    if balance.log:
+        add("## Balancing log")
+        add("")
+        add("The tuning lever is the **column silo** (isolation casing), which "
+            "lengthens the free column and so softens a stiff pier. A silo is "
+            "not free: it changes Lp, Δy, Δp, the displacement demand, "
+            "Vo = Mo/H_free, the minimum lateral strength and P-Δ, so every "
+            "pier whose silo changed was re-run through the full seismic check "
+            "suite (and re-optimised if that run was an optimise run).")
+        add("")
+        for entry in balance.log:
+            add(f"- {entry}")
+        add("")
+
+    return "\n".join(lines)
+
+
 def _detailed_calcs(rr: RowResult) -> list[str]:
     """Full equations, each shown symbolically then with substituted numbers and
     a specific code reference, so every value can be verified by hand."""
@@ -436,7 +556,7 @@ def _detailed_calcs(rr: RowResult) -> list[str]:
     conf = sec.confined
     mc = a.mc_col
     g = a.governing_bound
-    L = a.bounds[0].Le - a.bounds[0].fixity_depth          # column height Hcol
+    L = a.H_free or (a.bounds[0].Le - a.bounds[0].fixity_depth)   # free length
     P = mc.axial
     mu_d = max(b.mu_demand for b in a.bounds)
     is_ct = prov.shear_model == "caltrans"

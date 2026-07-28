@@ -160,7 +160,7 @@ class _Ctx:
         if not self.self_weight_in_axial:
             return self.axial
         Ag = math.pi * D ** 2 / 4.0
-        W = column_self_weight(Ag, self.geometry.Hcol, self.concrete_unit_weight)
+        W = column_self_weight(Ag, self.geometry.H_free, self.concrete_unit_weight)
         return self.axial + W
 
 
@@ -380,10 +380,10 @@ def size_shaft(column: ColumnDesign, shaft_start: ColumnDesign, ctx: _Ctx) -> Co
     P_col = ctx.effective_axial(column.D)
     gamma = ctx.provisions.shaft_demand_factor
     Mo = ctx.provisions.overstrength_factor * _plastic_moment(column, P_col)
-    Vo = Mo / ctx.geometry.Hcol
+    Vo = Mo / ctx.geometry.H_free
     if ctx.shaft_moment_basis == "fixity":
         Df = max(ctx.geometry.fixity_depth(m) for m in ctx.mults)
-        m_interface = Mo * (ctx.geometry.Hcol + Df) / ctx.geometry.Hcol
+        m_interface = Mo * (ctx.geometry.H_free + Df) / ctx.geometry.H_free
     else:
         m_interface = Mo
     # SGS 8.9 capacity-protection amplification must be applied here too, or the
@@ -413,7 +413,7 @@ def size_shaft(column: ColumnDesign, shaft_start: ColumnDesign, ctx: _Ctx) -> Co
     for _ in range(4):
         EI_shaft = _eff_EI(shaft, P_col)
         M_ig, V_ig, _ = inground_demand(
-            ctx.geometry.Hcol, L_embed, EI_col, EI_shaft, ctx.geometry.D_shaft,
+            ctx.geometry.H_free, L_embed, EI_col, EI_shaft, ctx.geometry.D_shaft,
             P_col, ctx.soil_profile, Vo, ctx.soil_bounds)
         m_demand = max(m_interface, gamma * M_ig)
         v_demand = max(Vo, V_ig)

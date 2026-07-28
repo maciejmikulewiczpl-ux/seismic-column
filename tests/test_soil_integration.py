@@ -96,8 +96,9 @@ def test_soil_report_prescribes_forces_and_py_detail():
     t = column_report(RowResult("P1", cd, sd, a, a.passed, False, []))
     assert "Point-of-fixity source: nonlinear p-y" in t
     assert "Applied pile-head forces" in t
-    assert "F_y" in t and "Mp / Hcol" in t             # stiffness solve force
-    assert "Vo" in t and "Mo / Hcol" in t              # in-ground design force
+    # the free length is H_free = Hcol + silo (equal to Hcol without a silo)
+    assert "F_y" in t and "Mp / H_free" in t           # stiffness solve force
+    assert "Vo" in t and "Mo / H_free" in t            # in-ground design force
     assert "p-y curve development" in t
     assert "In-ground shaft design" in t
     assert "Shaft flexure in-ground" in t

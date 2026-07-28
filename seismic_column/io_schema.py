@@ -26,7 +26,9 @@ from .demand import SpectrumSpec
 # Batch table columns (order preserved for display/export)
 COLUMNS: tuple[str, ...] = (
     "name",
+    "frame",
     "Hcol_ft",
+    "silo_ft",
     "D_shaft_in",
     "weight_kip",
     "axial_kip",
@@ -52,14 +54,38 @@ COLUMNS: tuple[str, ...] = (
     "shaft_spiral_bundle",
 )
 
-NUMERIC_COLUMNS = tuple(c for c in COLUMNS if c != "name")
+TEXT_COLUMNS: tuple[str, ...] = ("name", "frame")
+NUMERIC_COLUMNS = tuple(c for c in COLUMNS if c not in TEXT_COLUMNS)
+
+# A ``frame`` cell holding one of these means "leave this pier out of the
+# balanced-stiffness / balanced-geometry adjacency checks".
+NO_FRAME: frozenset[str] = frozenset({"", "-", "none", "nan", "na"})
+
+
+def in_frame(frame: object) -> bool:
+    """True if this ``frame`` value takes part in the balance checks."""
+    return str(frame).strip().lower() not in NO_FRAME
 
 # Human-friendly labels and help text for each table column (used by the GUI).
 COLUMN_META: dict[str, tuple[str, str]] = {
     "name": ("Column ID", "A label for this column / bent (e.g. Pier 3)."),
+    "frame": ("Frame / structure",
+              "Groups piers for the balanced-stiffness and balanced-geometry "
+              "checks. Piers sharing a frame are compared in TABLE ROW ORDER, "
+              "so consecutive rows are treated as adjacent. Leave blank or "
+              "enter '-' to exclude this pier from those checks."),
     "Hcol_ft": ("Column height (ft)",
-                "Clear height from top of shaft to the point of load / "
-                "contraflexure (deck level)."),
+                "Clear height to the point of load / contraflexure (deck "
+                "level), measured from the top of shaft — or, if there is a "
+                "column silo, from the original ground line at the top of the "
+                "silo. EXCLUDES the silo; the free length is Hcol + silo."),
+    "silo_ft": ("Column silo (ft)",
+                "Column silo / isolation casing depth. Lowers the top of shaft "
+                "by this much and lengthens the free column by the same amount "
+                "(free length = Hcol + silo); the embedded shaft length is "
+                "unchanged. Used to soften a stiff pier for the balanced-"
+                "stiffness rule. An entered value is a MINIMUM - the auto-silo "
+                "may increase it, never reduce it."),
     "D_shaft_in": ("Shaft dia. (in)",
                    "Type II shaft (enlarged pile) outside diameter."),
     "weight_kip": ("Seismic weight W (kip)",
@@ -131,6 +157,19 @@ class GlobalConfig:
     concrete_unit_weight: float = 0.150  # kcf (kip/ft^3)
     self_weight_mass_factor: float = 1.0 / 3.0   # fraction of col self-wt in seismic mass
     self_weight_in_axial: bool = True    # add col self-wt to axial P
+    # --- balanced stiffness (SDC 7.1.2 / SGS 4.1.2) & balanced frame geometry
+    #     (SDC 7.1.3 / SGS 4.1.3), between ADJACENT piers ---
+    # ``balance_check`` is the master switch behind the sidebar tick: when False
+    # nothing below runs, no silo is ever added, and results are identical to a
+    # run without the feature.
+    balance_check: bool = True
+    balance_mass_normalized: bool = True  # compare k/m (Caltrans form / SGS variable width)
+    balance_k_ratio_min: float = 0.75     # min(ki,kj)/max(ki,kj) for adjacent piers
+    balance_T_ratio_min: float = 0.70     # min(Ti,Tj)/max(Ti,Tj) for adjacent piers
+    balance_auto_silo: bool = True        # let the tool size column silos to comply
+    max_silo_ft: float = 20.0             # cap on any silo depth
+    silo_step_ft: float = 1.0             # silo depths quantised (rounded up) to this
+    balance_max_outer: int = 6            # outer silo <-> seismic re-check iterations
     # --- soil-structure interaction (point of fixity) ---
     fixity_source: str = "multiplier"    # "multiplier" (3x/6x) | "soil" (p-y)
     water_table_ft: float = 100.0        # depth to groundwater below top of shaft
@@ -286,7 +325,9 @@ def default_row(name: str = "C1") -> dict:
     """A sensible starting row."""
     return {
         "name": name,
+        "frame": "F1",
         "Hcol_ft": 22.0,
+        "silo_ft": 0.0,
         "D_shaft_in": 84.0,
         "weight_kip": 800.0,
         "axial_kip": 800.0,
@@ -356,7 +397,7 @@ OPTIMIZED_COLUMNS: frozenset[str] = frozenset({
 
 
 def validate(df: pd.DataFrame, min_shaft_oversize: float = 0.0,
-             optimize: bool = False) -> pd.DataFrame:
+             optimize: bool = False, max_silo_ft: float | None = None) -> pd.DataFrame:
     """Validate and normalise a batch table, filling defaults for missing cols.
 
     ``min_shaft_oversize`` is the required ``D_shaft - Dcol`` in inches: 0 for
@@ -367,6 +408,11 @@ def validate(df: pd.DataFrame, min_shaft_oversize: float = 0.0,
     optimiser determines, :data:`OPTIMIZED_COLUMNS`) are filled with a minimum
     placeholder instead of erroring — so an optimise run can leave the rebar
     blank.  Other blanks (loads, height, diameters, cover) still error.
+
+    ``max_silo_ft``: when given, ``silo_ft`` entries deeper than this error.
+    The batch runner does *not* pass it — the auto-silo cap limits what the tool
+    adds, not what an engineer deliberately types in — but an importer or a GUI
+    that wants the stricter reading can.
     """
     df = df.copy()
     missing_required = {"Hcol_ft", "D_shaft_in", "weight_kip", "axial_kip", "Dcol_in"}
@@ -379,6 +425,13 @@ def validate(df: pd.DataFrame, min_shaft_oversize: float = 0.0,
         if col not in df.columns:
             df[col] = defaults[col]
     df = df[list(COLUMNS)]
+
+    # ``frame`` groups piers for the balance checks.  A missing COLUMN means an
+    # older table, which is one run of piers in series -> one frame.  A blank
+    # CELL is meaningful and preserved: that pier opts out (see ``in_frame``).
+    df["frame"] = df["frame"].fillna("").astype(str).str.strip()
+    # A silo is optional everywhere; blank = none.
+    df["silo_ft"] = pd.to_numeric(df["silo_ft"], errors="coerce").fillna(0.0)
 
     for col in NUMERIC_COLUMNS:
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -402,6 +455,16 @@ def validate(df: pd.DataFrame, min_shaft_oversize: float = 0.0,
     if df[list(NUMERIC_COLUMNS)].isna().any().any():
         bad = df[df[list(NUMERIC_COLUMNS)].isna().any(axis=1)].index.tolist()
         raise ValueError(f"Non-numeric or missing values in rows: {bad}")
+
+    if (df["silo_ft"] < 0).any():
+        rows = ", ".join(str(n) for n in df.loc[df["silo_ft"] < 0, "name"])
+        raise ValueError(f"Column silo depth cannot be negative: {rows}")
+    if max_silo_ft is not None and (df["silo_ft"] > max_silo_ft).any():
+        over = df[df["silo_ft"] > max_silo_ft]
+        rows = ", ".join(f"{r['name']} ({r['silo_ft']:g} ft)"
+                         for _, r in over.iterrows())
+        raise ValueError(
+            f"Column silo depth exceeds the {max_silo_ft:g} ft maximum: {rows}")
 
     # An "oversized" (Type II) shaft is by definition larger in diameter than
     # the column it supports (AASHTO SGS, Section 2 definitions).  The whole

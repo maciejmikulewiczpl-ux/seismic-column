@@ -410,6 +410,13 @@ class ColumnAssessment:
     inground_solution: PileSolution | None = None   # overstrength p-y (shaft design)
     inground_moment: float = 0.0               # max |M| below ground at Mo, kip-in
     inground_shear: float = 0.0                # max |V| below ground at Mo, kip
+    Hcol_entered: float = 0.0                  # entered column clear height, in
+    silo: float = 0.0                          # column silo (isolation casing) depth, in
+
+    @property
+    def H_free(self) -> float:
+        """Free column length used by the mechanics (Hcol + silo), in."""
+        return self.Hcol_entered + self.silo
 
     @property
     def passed(self) -> bool:
@@ -509,8 +516,14 @@ def evaluate_column(
     if shaft_moment_basis not in ("interface", "fixity"):
         raise ValueError("shaft_moment_basis must be 'interface' or 'fixity'")
 
+    # A column silo lowers the top of shaft, so the shaft's p-y springs start
+    # that far into the strata; the embedded length is unchanged (the tip goes
+    # deeper).  ``below`` retains the stripped overburden.  No-op without a silo.
+    if soil_profile is not None:
+        soil_profile = soil_profile.below(geometry.silo)
+
     # --- column self-weight participation ---
-    W_self = column_self_weight(column.Ag, geometry.Hcol, concrete_unit_weight)
+    W_self = column_self_weight(column.Ag, geometry.H_free, concrete_unit_weight)
     P_used = axial + (W_self if self_weight_in_axial else 0.0)
     weight_mass = weight + self_weight_mass_factor * W_self
     if shaft_axial is None:
@@ -529,9 +542,9 @@ def evaluate_column(
     Ieff_shaft = EI_shaft / Ec_shaft
 
     dbl = bar_diameter(column.long_bar_no)
-    Lp = plastic_hinge_length(geometry.Hcol, column.fye, dbl)
+    Lp = plastic_hinge_length(geometry.H_free, column.fye, dbl)
     Mo = provisions.overstrength_factor * mc_col.Mp
-    F_y = mc_col.Mp / geometry.Hcol            # yield head force (soil solve level)
+    F_y = mc_col.Mp / geometry.H_free      # yield head force (soil solve level)
 
     # --- build the fixity bounds: from manual multipliers, or soil-derived ---
     if fixity_source == "soil":
@@ -543,7 +556,7 @@ def evaluate_column(
         for factor in soil_bounds:
             prof = replace(soil_profile,
                            stiffness_factor=soil_profile.stiffness_factor * factor)
-            sol = _cached_pile_solve(geometry.Hcol, L_embed, EI_col, EI_shaft,
+            sol = _cached_pile_solve(geometry.H_free, L_embed, EI_col, EI_shaft,
                                      geometry.D_shaft, P_used, prof, F_y)
             mult = sol.Df_eq / geometry.D_shaft
             bound_specs.append((mult, sol, _lbl.get(factor, f"×{factor:g}")))
@@ -557,10 +570,11 @@ def evaluate_column(
         k = geometry.lateral_stiffness(EI_col, EI_shaft, mult)
         demand = displacement_demand(spectrum, k, weight_mass)
 
-        # displacement capacity: hinge at top of shaft, arm = Hcol
+        # displacement capacity: hinge at top of shaft (bottom of the silo,
+        # if any), arm = H_free
         delta_y = F_y * geometry.tip_flexibility(EI_col, EI_shaft, mult)
         theta_p = Lp * (mc_col.phi_u - mc_col.phi_y)
-        delta_p = theta_p * (geometry.Hcol - Lp / 2.0)
+        delta_p = theta_p * (geometry.H_free - Lp / 2.0)
         delta_c = delta_y + delta_p
         mu_capacity = delta_c / delta_y if delta_y > 0 else float("nan")
         # SGS 4.3.3: magnify the elastic displacement demand for short-period
@@ -571,7 +585,7 @@ def evaluate_column(
         mu_demand = demand.disp_demand / delta_y if delta_y > 0 else float("nan")
 
         Df = geometry.fixity_depth(mult)
-        shaft_moment_fixity = Mo * (geometry.Hcol + Df) / geometry.Hcol
+        shaft_moment_fixity = Mo * (geometry.H_free + Df) / geometry.H_free
 
         lle_demand = None
         mu_lle = None
@@ -594,17 +608,17 @@ def evaluate_column(
     governing = max(bounds, key=lambda b: b.demand.disp_demand / b.delta_c)
 
     # --- in-ground shaft demand at column OVERSTRENGTH (soil mode) ---
-    # Apply Vo = Mo/Hcol so the column develops Mo at the top of shaft; the p-y
+    # Apply Vo = Mo/H_free so the column develops Mo at the top of shaft; the p-y
     # solve then gives the moment & shear the shaft must resist ALONG ITS DEPTH
     # (capacity protection). Envelope over the soil-stiffness bounds.
     inground = None                 # governing overstrength PileSolution
     inground_M = 0.0                # max |M| below ground at Mo, kip-in
     inground_V = 0.0               # max |V| below ground at Mo, kip
     if fixity_source == "soil" and soil_profile is not None:
-        Vo = Mo / geometry.Hcol
+        Vo = Mo / geometry.H_free
         L_embed = shaft_embed_length or soil_profile.depth
         inground_M, inground_V, inground = inground_demand(
-            geometry.Hcol, L_embed, EI_col, EI_shaft, geometry.D_shaft, P_used,
+            geometry.H_free, L_embed, EI_col, EI_shaft, geometry.D_shaft, P_used,
             soil_profile, Vo, soil_bounds)
 
     checks = _build_checks(
@@ -638,6 +652,7 @@ def evaluate_column(
                             (soil_profile.depth if soil_profile else 0.0)),
         inground_solution=inground, inground_moment=inground_M,
         inground_shear=inground_V,
+        Hcol_entered=geometry.Hcol, silo=geometry.silo,
     )
 
 
@@ -677,7 +692,7 @@ def _build_checks(
     # 4. transverse reinforcement minimum (column, inside plastic hinge)
     if provisions.transverse_min_model == "caltrans_table":
         rho_s_min, in_table, note = caltrans_min_transverse_ratio(
-            column.D, geometry.Hcol, column.rho_l, axial, column.fc, column.Ag)
+            column.D, geometry.H_free, column.rho_l, axial, column.fc, column.Ag)
         # Outside the table the code offers no formula — the designer must run
         # the PSDC procedure — so we cannot certify the minimum is met.
         passed = in_table and column.rho_s >= rho_s_min
@@ -698,7 +713,7 @@ def _build_checks(
     # 5. column shear (inside plastic hinge, governing mu_d)
     phiVn, Vc, Vs = shear_capacity(column, axial, mu_d, inside_hinge=True,
                                    provisions=provisions)
-    Vo = Mo / geometry.Hcol
+    Vo = Mo / geometry.H_free
     checks.append(Check(
         "Column shear", Vo, phiVn, phiVn >= Vo,
         f"Vo={Vo:.1f} kip, phiVn={phiVn:.1f} kip (Vc={Vc:.1f}, Vs={Vs:.1f})",
@@ -714,7 +729,7 @@ def _build_checks(
     ))
 
     # 7. minimum lateral strength: Vp = Mp/Hcol >= factor*P
-    Vp = mc_col.Mp / geometry.Hcol
+    Vp = mc_col.Mp / geometry.H_free
     min_v = provisions.min_strength_factor * axial
     checks.append(Check(
         "Minimum lateral strength", min_v, Vp, Vp >= min_v,
@@ -816,7 +831,7 @@ def _build_checks(
                 f"#{column.long_bar_no} longitudinal bars",
             ))
             dbl_eff = effective_bar_diameter(dbl, column.long_bundle)
-            dbl_max = max_bar_diameter(column.fc, geometry.Hcol, column.D,
+            dbl_max = max_bar_diameter(column.fc, geometry.H_free, column.D,
                                        column.fye)
             checks.append(Check(
                 "Longitudinal bar diameter (bond)", dbl_eff, dbl_max,

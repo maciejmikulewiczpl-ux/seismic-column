@@ -34,7 +34,7 @@ Davisson, M.T. & Robinson, K.E. (1965). "Bending and buckling of partially
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
@@ -144,6 +144,10 @@ class SoilProfile:
     J: float = 0.5                         # Matlock/stiff-clay bearing factor
     cyclic: bool = True                    # seismic -> cyclic p-y branches
     stiffness_factor: float = 1.0          # scales p (and Es) for upper/lower bounds
+    # Overburden already present at z = 0, ksi.  Non-zero only for a profile
+    # returned by :meth:`below` (a column silo lowers the top of shaft, but the
+    # soil outside the silo is intact and still presses down).
+    sigma_v0: float = 0.0
     # cumulative layer-top depths (in), filled on init
     _tops: tuple[float, ...] = field(init=False, default=())
 
@@ -161,7 +165,8 @@ class SoilProfile:
 
     def signature(self) -> tuple:
         """Hashable summary of the profile (for caching pile solves)."""
-        return (self.J, self.cyclic, round(self.stiffness_factor, 6)) + tuple(
+        return (self.J, self.cyclic, round(self.stiffness_factor, 6),
+                round(self.sigma_v0, 10)) + tuple(
             (l.py_model, round(l.thickness, 4), round(l.gamma_eff, 12),
              round(l.su_top, 8), round(l.su_bot, 8), round(l.eps50, 6),
              round(l.phi, 4), round(l.k_py, 10)) for l in self.layers)
@@ -175,7 +180,7 @@ class SoilProfile:
 
     def sigma_v_eff(self, z: float) -> float:
         """Effective vertical (overburden) stress at depth ``z`` (in), ksi."""
-        s, remaining = 0.0, z
+        s, remaining = self.sigma_v0, z
         for lyr in self.layers:
             dz = min(remaining, lyr.thickness)
             if dz <= 0.0:
@@ -185,6 +190,41 @@ class SoilProfile:
         if remaining > 0.0 and self.layers:            # below the profile
             s += self.layers[-1].gamma_eff * remaining
         return s
+
+    def below(self, depth: float) -> "SoilProfile":
+        """The same profile seen from a surface ``depth`` (in) lower down.
+
+        Used for a **column silo**: the silo void lowers the top of shaft by its
+        depth, so the shaft's p-y springs start that far into the strata.  The
+        top ``depth`` of layers is stripped (splitting the partially consumed
+        layer, interpolating ``su``), and the overburden it carried is retained
+        in :attr:`sigma_v0` — the soil around the silo is intact and still
+        presses down.  The near-surface wedge terms (which key off ``z``)
+        restart at the bottom of the silo, which is the conservative and
+        conventional isolation-casing treatment.
+
+        Returns ``self`` for ``depth <= 0``.
+        """
+        if depth <= 0.0 or not self.layers:
+            return self
+        kept: list[SoilLayer] = []
+        remaining = depth
+        for lyr in self.layers:
+            if remaining >= lyr.thickness:             # wholly above the new surface
+                remaining -= lyr.thickness
+                continue
+            if remaining > 0.0:                        # partially consumed
+                kept.append(replace(
+                    lyr, thickness=lyr.thickness - remaining,
+                    su_top=lyr.su_at(remaining)))
+                remaining = 0.0
+            else:
+                kept.append(lyr)
+        if not kept:      # silo deeper than the profile: extend the bottom layer
+            kept = [replace(self.layers[-1], su_top=self.layers[-1].su_bot)]
+        return SoilProfile(layers=tuple(kept), J=self.J, cyclic=self.cyclic,
+                           stiffness_factor=self.stiffness_factor,
+                           sigma_v0=self.sigma_v_eff(depth))
 
     # ------------------------------------------------------------------
     def p_ult(self, z: float, D: float) -> float:

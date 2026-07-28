@@ -38,6 +38,23 @@ code; see [seismic_column/provisions.py](seismic_column/provisions.py).
   assumed, so `μΔ` in `α'` is the computed displacement-ductility demand.
 - Greedy, **priority-ordered optimiser** (default: longitudinal → confinement →
   diameter → f'c) with user-selectable fixed/variable parameters.
+- **Balanced stiffness & balanced frame geometry between adjacent piers** —
+  Caltrans SDC 2.1 **§7.1.2** (Table 7.1.2-1) and **§7.1.3**, AASHTO SGS
+  **§4.1.2** and **§4.1.3**. Piers carrying simply supported spans in series are
+  grouped by a `frame` column and compared in table row order:
+  `min(κi,κj)/max(κi,κj) ≥ 0.75` with `κ = kᵉ/m` (or `kᵉ` for the constant-width
+  AASHTO form) and `min(Ti,Tj)/max(Ti,Tj) ≥ 0.70`, evaluated at **every** fixity
+  bound like-for-like. Adjacent pairs only; the any-two-bents 0.50 rule is not
+  applied. The whole feature is behind one tick in the sidebar.
+- **Column silos** (isolation casings) as the tuning lever — SDC **C7.1.2** /
+  SGS **§4.1.4**. A silo of depth `h` lowers the top of shaft and lengthens the
+  free column to `H_free = Hcol + h`, softening a stiff pier; the plastic hinge
+  stays at the top of shaft (bottom of the silo), the embedded shaft length is
+  unchanged, and the p-y springs start at the bottom of the silo. Because
+  `H_free` also drives `Lp`, `Δy`, `Δp`, `Vo = Mo/H_free`, the minimum lateral
+  strength and P-Δ, **a silo is never free**: the tool auto-sizes silos, re-runs
+  the full seismic suite on every changed pier, and iterates until both the
+  seismic and the balance checks hold — or reports exactly why it cannot.
 - **Batch tabular** workflow (editable table + CSV/Excel import/export), results
   grid, per-column drill-down with M-φ and spectrum plots, and Markdown reports.
 - **Point of fixity — assumed *or* soil-derived.** Either the classic Df = 3×/6×
@@ -88,13 +105,24 @@ Run the tests:
 
 - **Single-column bent** (cantilever): lateral load at column top, plastic hinge
   in the column at the top of shaft.
+- **Free column length** `H_free = Hcol + silo` — every mechanics quantity below
+  uses `H_free`, not the entered `Hcol`. Without a column silo they are equal.
 - **Δy** uses the elastic two-segment cantilever to the point of fixity; **Δp =
-  θp·(Hcol − Lp/2)** with `θp = Lp·(φu − φy)`; **Δc = Δy + Δp**.
-- **Plastic hinge length**: `Lp = 0.08·Hcol + 0.15·fye·dbl ≥ 0.3·fye·dbl`.
+  θp·(H_free − Lp/2)** with `θp = Lp·(φu − φy)`; **Δc = Δy + Δp**.
+- **Plastic hinge length**: `Lp = 0.08·H_free + 0.15·fye·dbl ≥ 0.3·fye·dbl`.
 - **Ultimate confined strain**: `εcu = 0.004 + 1.4·ρs·fyh·εsu / f'cc`.
 - **Design spectrum**: AASHTO/Caltrans two-parameter form (`Sds`, `Sd1`);
   displacement demand from the equal-displacement rule at the effective
   (cracked) period.
+- **Balance comparison basis**: adjacent piers are compared **bound by bound**
+  (stiff-vs-stiff, soft-vs-soft) so the same modelling assumption applies to
+  both, and every bound must comply. Note that with `κ = k/m` the identity
+  `(Ti/Tj)² = κj/κi` makes the 0.75 stiffness rule stricter than the 0.70 period
+  rule (`√0.75 = 0.87`), so §7.1.3 follows from §7.1.2; both are still reported.
+- **Column silo and the soil profile**: the silo strips the top `h` of strata
+  (the shaft now starts that much deeper) while carrying the removed overburden
+  forward, so the near-surface wedge terms restart at the bottom of the silo —
+  the conservative, conventional isolation-casing treatment.
 - **Shaft flexural demand basis** is configurable: `interface` (default — the
   column overstrength moment `Mo` at the top of shaft, the standard SDC
   capacity-protection demand) or `fixity` (Mo amplified linearly to the assumed
@@ -129,9 +157,10 @@ seismic_column/
   pile_solver.py       FE beam-column on nonlinear Winkler springs (p-y)
   sdc_capacity.py      Lp, Δ-capacity, all SDC checks, shaft capacity protection
   optimizer.py         greedy priority-ordered design search
+  balance.py           adjacent-pier balanced stiffness/geometry + silo sizing
   io_schema.py         batch table schema + CSV/Excel I/O + validation
-  batch.py             batch runner + summary grid
-  report.py            per-column Markdown report
+  batch.py             batch runner, balance stages + summary grid
+  report.py            per-column and balance Markdown reports
 app.py                 Streamlit GUI
 tests/                 pytest suite
 ```

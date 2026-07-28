@@ -16,7 +16,8 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from seismic_column.batch import RowResult, results_to_dataframe, run_batch
+from seismic_column.batch import (RowResult, results_to_dataframe,
+                                  run_batch_balanced)
 from seismic_column.demand import SpectrumSpec
 from seismic_column.io_schema import (
     COLUMNS,
@@ -24,6 +25,7 @@ from seismic_column.io_schema import (
     GlobalConfig,
     SOIL_COLUMN_META,
     SOIL_COLUMNS,
+    TEXT_COLUMNS,
     build_soil_profile,
     default_dataframe,
     default_soil_layers,
@@ -39,7 +41,7 @@ from seismic_column.io_schema import (
 )
 from seismic_column.optimizer import PARAMETERS
 from seismic_column.provisions import PROVISIONS
-from seismic_column.report import column_report
+from seismic_column.report import balance_report, column_report
 
 st.set_page_config(page_title="Seismic Column Optimiser (SDC 2.1)", layout="wide")
 
@@ -86,6 +88,14 @@ _DEFAULTS = {
     "self_weight_in_axial": True,
     "project_path": "",       # current project file for in-place Save/Open
     "editor_version": 0,      # bump to force the batch editor to re-init
+    # balanced stiffness / balanced frame geometry between adjacent piers
+    "balance_check": True,
+    "balance_mass_normalized": True,
+    "balance_k_ratio_min": 0.75,
+    "balance_T_ratio_min": 0.70,
+    "balance_auto_silo": True,
+    "max_silo_ft": 20.0,
+    "silo_step_ft": 1.0,
     # soil-structure interaction (point of fixity)
     "fixity_source": "multiplier",
     "water_table_ft": 10.0,
@@ -139,6 +149,13 @@ def _build_config() -> GlobalConfig:
         concrete_unit_weight=s("concrete_unit_weight"),
         self_weight_mass_factor=s("self_weight_mass_factor"),
         self_weight_in_axial=s("self_weight_in_axial"),
+        balance_check=s("balance_check"),
+        balance_mass_normalized=s("balance_mass_normalized"),
+        balance_k_ratio_min=s("balance_k_ratio_min"),
+        balance_T_ratio_min=s("balance_T_ratio_min"),
+        balance_auto_silo=s("balance_auto_silo"),
+        max_silo_ft=s("max_silo_ft"),
+        silo_step_ft=s("silo_step_ft"),
         fixity_source=s("fixity_source"),
         water_table_ft=s("water_table_ft"),
         shaft_embed_ft=s("shaft_embed_ft"),
@@ -183,6 +200,13 @@ def _load_project_into_state(df: pd.DataFrame, cfg: GlobalConfig) -> None:
     s["concrete_unit_weight"] = cfg.concrete_unit_weight
     s["self_weight_mass_factor"] = cfg.self_weight_mass_factor
     s["self_weight_in_axial"] = cfg.self_weight_in_axial
+    s["balance_check"] = getattr(cfg, "balance_check", True)
+    s["balance_mass_normalized"] = getattr(cfg, "balance_mass_normalized", True)
+    s["balance_k_ratio_min"] = getattr(cfg, "balance_k_ratio_min", 0.75)
+    s["balance_T_ratio_min"] = getattr(cfg, "balance_T_ratio_min", 0.70)
+    s["balance_auto_silo"] = getattr(cfg, "balance_auto_silo", True)
+    s["max_silo_ft"] = getattr(cfg, "max_silo_ft", 20.0)
+    s["silo_step_ft"] = getattr(cfg, "silo_step_ft", 1.0)
     s["fixity_source"] = getattr(cfg, "fixity_source", "multiplier")
     s["water_table_ft"] = getattr(cfg, "water_table_ft", 10.0)
     s["shaft_embed_ft"] = getattr(cfg, "shaft_embed_ft", 60.0)
@@ -432,6 +456,56 @@ with st.sidebar:
     st.number_input("ρl min", 0.005, 0.03, key="rho_l_min", step=0.001, format="%.3f")
     st.number_input("ρl max", 0.02, 0.08, key="rho_l_max", step=0.001, format="%.3f")
 
+    st.subheader("Balanced stiffness & frame geometry")
+    st.checkbox(
+        "Check balanced stiffness & frame geometry", key="balance_check",
+        help="Caltrans SDC 2.1 §7.1.2 / §7.1.3 (AASHTO SGS §4.1.2 / §4.1.3), "
+             "between ADJACENT piers only. Piers are grouped by the 'frame' "
+             "column of the batch table and compared in table row order; a "
+             "blank 'frame' cell leaves that pier out. Untick to switch the "
+             "whole feature off — no checks, no silos, results unchanged.")
+    _bal = st.session_state.get("balance_check", True)
+    if not _bal:
+        st.caption("Balance checks off — adjacent piers are not compared and no "
+                   "column silo is added.")
+    st.checkbox(
+        "Auto-size column silos to satisfy them", key="balance_auto_silo",
+        disabled=not _bal,
+        help="Lengthens the free column of the stiffer pier of a failing pair "
+             "(isolation casing, SDC C7.1.2 / SGS §4.1.4) and re-runs its full "
+             "seismic check suite — a silo raises the displacement demand and "
+             "lowers Vo and Vp, so it is not free. An entered 'silo_ft' is a "
+             "minimum and is never reduced. Unticked = report the shortfall "
+             "without changing any design.")
+    st.checkbox(
+        "Normalise stiffness by tributary mass (k/m)",
+        key="balance_mass_normalized", disabled=not _bal,
+        help="Ticked: compare k/m — the Caltrans Table 7.1.2-1 form, and the "
+             "AASHTO variable-width form (Eq. 4.1.2-4). Untick to compare k "
+             "alone (AASHTO constant-width, Eq. 4.1.2-3). Spans in series with "
+             "differing tributary masses want the normalised form.")
+    bc1, bc2 = st.columns(2)
+    bc1.number_input("Min adjacent k ratio", 0.5, 1.0, key="balance_k_ratio_min",
+                     step=0.05, disabled=not _bal,
+                     help="min(ki,kj)/max(ki,kj). Code minimum 0.75; a stricter "
+                          "entry is honoured, a looser one is ignored.")
+    bc2.number_input("Min adjacent period ratio", 0.5, 1.0,
+                     key="balance_T_ratio_min", step=0.05, disabled=not _bal,
+                     help="min(Ti,Tj)/max(Ti,Tj). Code minimum 0.70.")
+    bs1, bs2 = st.columns(2)
+    bs1.number_input("Max silo depth (ft)", 0.0, 60.0, key="max_silo_ft",
+                     step=1.0, disabled=not (_bal and
+                                             st.session_state.get("balance_auto_silo", True)),
+                     help="How deep the tool may size a silo by itself. If the "
+                          "cap binds, the run reports the shortfall instead of "
+                          "going deeper. A deeper silo typed into the table is "
+                          "your call and is honoured as-is.")
+    bs2.number_input("Silo increment (ft)", 0.25, 5.0, key="silo_step_ft",
+                     step=0.25, disabled=not (_bal and
+                                              st.session_state.get("balance_auto_silo", True)),
+                     help="Silo depths are rounded UP to a whole number of "
+                          "these — a buildable increment.")
+
     st.subheader("Point of fixity")
     st.radio(
         "How is the depth to fixity determined?", ["multiplier", "soil"],
@@ -517,7 +591,7 @@ if upload is not None:
 col_config = {}
 for c in COLUMNS:
     label, help_txt = COLUMN_META[c]
-    if c == "name":
+    if c in TEXT_COLUMNS:
         col_config[c] = st.column_config.TextColumn(label, help=help_txt)
     elif c in INT_COLS:
         col_config[c] = st.column_config.NumberColumn(label, help=help_txt, step=1)
@@ -572,17 +646,28 @@ if st.button("Run batch", type="primary"):
         tally.caption(f"✅ {counts['PASS']} pass · ❌ {counts['FAIL']} fail · "
                       f"⚠️ {counts['ERROR']} error")
 
+    stage = {"txt": ""}      # set once the balance stage takes over
+
     def _on_candidate(name, it):
         # live movement WITHIN a column (a soil p-y optimise can take a while per
         # column, and per-row progress alone can't show that it's working).
-        row_i = done_rows["n"] + 1
-        bar.progress(done_rows["n"] / n_total,
-                     text=f"Analysing {row_i}/{n_total} — {name}: "
-                          f"trying design {it}… ({time.time() - t0:.0f}s)")
+        row_i = min(done_rows["n"] + 1, n_total)
+        where = stage["txt"] or f"Analysing {row_i}/{n_total}"
+        bar.progress(min(done_rows["n"] / n_total, 1.0),
+                     text=f"{where} — {name}: trying design {it}… "
+                          f"({time.time() - t0:.0f}s)")
+
+    def _balance_progress(msg):
+        # the balance stage re-runs an unpredictable subset of rows, so it gets
+        # a message rather than a done-count.
+        stage["txt"] = msg
+        bar.progress(1.0, text=f"{msg} ({time.time() - t0:.0f}s)")
 
     try:
-        summary, results = run_batch(edited, cfg, progress=_progress,
-                                     on_candidate=_on_candidate)
+        outcome = run_batch_balanced(edited, cfg, progress=_progress,
+                                     on_candidate=_on_candidate,
+                                     balance_progress=_balance_progress)
+        summary, results = outcome.summary, outcome.results
     except Exception as exc:
         st.error(f"Run failed: {exc}")
     else:
@@ -590,6 +675,7 @@ if st.button("Run batch", type="primary"):
                                f"{time.time() - t0:.0f}s")
         st.session_state["summary"] = summary
         st.session_state["results"] = results
+        st.session_state["balance"] = outcome.balance
         if cfg.optimize and results:
             # Fold the optimised designs back into the table so the batch is the
             # current design of record and Save persists progress.  A write-back
@@ -619,6 +705,77 @@ if "summary" in st.session_state:
     st.dataframe(summary, width="stretch")
     st.download_button("Export results CSV", summary.to_csv(index=False).encode(),
                        "results.csv", "text/csv")
+
+    balance = st.session_state.get("balance")
+    if balance is not None:
+        cr = balance.criteria
+        st.subheader("Balanced stiffness & frame geometry")
+        if not balance.checks:
+            st.info("No adjacent pairs to check — fewer than two piers share a "
+                    "frame. Set the **frame** column in the batch table.")
+        elif balance.passed:
+            st.success(f"All adjacent pairs comply "
+                       f"(κ ratio ≥ {cr.k_ratio_min:.2f}, "
+                       f"T ratio ≥ {cr.T_ratio_min:.2f}).")
+        else:
+            st.error(f"{len(balance.failed)} adjacent-pair check(s) fail."
+                     + ("" if balance.converged else
+                        " The silo search did not converge — see the log."))
+
+        if balance.bents:
+            bent_rows = []
+            for b in balance.bents:
+                row = {"pier": b.name, "frame": b.frame,
+                       "Hcol_ft": round(b.Hcol / 12, 1),
+                       "silo_ft": round(b.silo / 12, 1),
+                       "H_free_ft": round(b.H_free / 12, 1),
+                       "m_kip_s2_in": round(b.mass, 3)}
+                for i in range(len(b.k)):
+                    row[f"k [{b.label(i)}]"] = round(b.k[i], 2)
+                    row[f"T [{b.label(i)}]"] = round(b.T[i], 3)
+                    row[f"κ [{b.label(i)}]"] = round(
+                        b.kappa(i, cr.mass_normalized), 3)
+                bent_rows.append(row)
+            st.dataframe(pd.DataFrame(bent_rows), width="stretch")
+
+        if balance.checks:
+            st.dataframe(pd.DataFrame([{
+                "check": c.name, "pair": f"{c.pair[0]}–{c.pair[1]}",
+                "bound": c.bound,
+                "ratio": None if np.isnan(c.ratio) else round(c.ratio, 3),
+                "limit": c.limit,
+                "status": "PASS" if c.passed else "FAIL",
+                "values": c.note,
+            } for c in balance.checks]), width="stretch")
+
+            # κ and T along the bridge, per frame
+            bk1, bk2 = st.columns(2)
+            for col, (vals, ylabel, limit_txt) in (
+                    (bk1, ([b.kappa(0, cr.mass_normalized) for b in balance.bents],
+                           f"κ = {cr.kappa_symbol} [{balance.bents[0].label(0)}]",
+                           f"adjacent ratio ≥ {cr.k_ratio_min:.2f}")),
+                    (bk2, ([b.T[0] for b in balance.bents],
+                           f"T (s) [{balance.bents[0].label(0)}]",
+                           f"adjacent ratio ≥ {cr.T_ratio_min:.2f}"))):
+                figb, axb = plt.subplots()
+                axb.step(range(len(balance.bents)), vals, where="mid",
+                         marker="o", lw=1.5)
+                axb.set_xticks(range(len(balance.bents)))
+                axb.set_xticklabels([b.name for b in balance.bents])
+                axb.set_xlabel("pier (in table order)")
+                axb.set_ylabel(ylabel)
+                axb.set_title(limit_txt)
+                axb.grid(alpha=0.3)
+                col.pyplot(figb)
+
+        if balance.log:
+            with st.expander("Balancing log (what the silo search did)"):
+                for entry in balance.log:
+                    st.markdown(f"- {entry}")
+
+        st.download_button("Download balance report (Markdown)",
+                           balance_report(balance).encode("utf-8"),
+                           "balance_report.md", "text/markdown")
 
     if results:
         st.subheader("Drill-down")

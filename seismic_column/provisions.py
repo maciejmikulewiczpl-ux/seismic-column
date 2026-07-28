@@ -102,6 +102,18 @@ class CodeProvisions:
     ref_shaft_capacity: str
     ref_detailing: str = ""
     ref_max_axial: str = ""
+    # ---- balanced stiffness / balanced frame geometry (adjacent piers) ----
+    # Caltrans SDC 2.1 Table 7.1.2-1 (adjacent bents in a frame) and §7.1.3;
+    # AASHTO SGS 3rd Ed. Eq. 4.1.2-3/-4 and Eq. 4.1.3-1.  Both codes land on the
+    # same two numbers, so these carry defaults and only the refs differ.
+    balance_k_ratio_adjacent: float = 0.75   # min(ki,kj)/max(ki,kj), adjacent bents
+    balance_T_ratio: float = 0.70            # min(Ti,Tj)/max(Ti,Tj), adjacent frames
+    ref_balanced_stiffness: str = ("Caltrans SDC 2.1 §7.1.2 Table 7.1.2-1 "
+                                   "(adjacent bents: 0.75 ≤ (ki/mi)/(kj/mj) ≤ 1.33)")
+    ref_balanced_geometry: str = ("Caltrans SDC 2.1 §7.1.3 "
+                                  "(adjacent frames: 0.7 ≤ Ti/Tj ≤ 1.43)")
+    ref_balance_tuning: str = ("Caltrans SDC 2.1 C7.1.2 (adjust effective column "
+                               "lengths — lower footings using isolation casing)")
 
 
 SDC_2_1 = CodeProvisions(
@@ -189,6 +201,13 @@ AASHTO_SGS_3 = CodeProvisions(
     ref_detailing="AASHTO SGS 3rd Ed. §8.8.6 (max bar diameter) & §8.8.9 "
                   "(max tie spacing, min tie size)",
     ref_max_axial="AASHTO SGS 3rd Ed. §8.7.2 (Pu ≤ 0.2·f'c·Ag)",
+    ref_balanced_stiffness="AASHTO SGS 3rd Ed. §4.1.2 Eq. 4.1.2-3 (constant width) "
+                           "/ Eq. 4.1.2-4 (variable width): ki_e/kj_e ≥ 0.75, "
+                           "adjacent bents",
+    ref_balanced_geometry="AASHTO SGS 3rd Ed. §4.1.3 Eq. 4.1.3-1 "
+                          "(adjacent frames: Ti/Tj ≥ 0.7)",
+    ref_balance_tuning="AASHTO SGS 3rd Ed. §4.1.4 (adjust effective column "
+                       "lengths — lower footings, isolation casing)",
 )
 
 # Backwards-compatible alias: older code/tests referenced ``SDC_2_0``.
