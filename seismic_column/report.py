@@ -455,7 +455,7 @@ def balance_report(balance) -> str:
     """
     from .balance import (END_CONDITION_NOTE, GEOMETRY_CHECK,
                           STIFFNESS_ANY_CHECK, STIFFNESS_CHECK)
-    from .io_schema import DIRECTIONS
+    from .io_schema import DIRECTIONS, LONGITUDINAL, TRANSVERSE
 
     cr = balance.criteria
     kap = cr.kappa_symbol
@@ -532,8 +532,8 @@ def balance_report(balance) -> str:
             continue
         add(f"### {direction.capitalize()}")
         add("")
-        hdr = "| Frame | Bents | M (kip·s²/in) |"
-        sep = "|:--|:--|--:|"
+        hdr = "| Frame | Bents | End condition | M (kip·s²/in) |"
+        sep = "|:--|:--|:--|--:|"
         for i in range(n_b):
             lbl = balance.bents[0].label(i) if balance.bents else f"bound {i+1}"
             hdr += f" K [{lbl}] (kip/in) | T [{lbl}] (s) |"
@@ -543,7 +543,7 @@ def balance_report(balance) -> str:
         for f in frames:
             row = (f"| {f.key} | {' + '.join(f.names)}"
                    f"{' *(continuous)*' if f.continuous else ''} "
-                   f"| {f.M():.3f} |")
+                   f"| {f.end_conditions} | {f.M():.3f} |")
             for i in range(n_b):
                 if i < f.n_bounds:
                     row += f" {f.K(i):.2f} | {f.T(i):.3f} |"
@@ -555,10 +555,11 @@ def balance_report(balance) -> str:
     # ------------------------------------------------------------------
     add("## Bents")
     add("")
-    add("k is the effective lateral stiffness of the two-segment equivalent "
-        "cantilever at cracked stiffness EI = Mp/φy — the same k that drives "
-        "each pier's displacement demand, and the same in both directions "
-        "because a circular column on a circular shaft is axisymmetric.")
+    add("k is the effective lateral stiffness of the two-segment member at "
+        "cracked stiffness EI = Mp/φy. The SECTION is axisymmetric, so k "
+        "differs by direction only through the END CONDITION: an integral "
+        "(moment-connected) bent is fixed-fixed longitudinally, everything else "
+        "— and every bent transversely — is a fixed-free cantilever.")
     add("")
     add("**m** is the tributary mass the codes call for. It is the entered "
         "tributary weight for that direction, **plus** the column self-weight "
@@ -568,8 +569,8 @@ def balance_report(balance) -> str:
         "sway mode. The exclusion is a modelling assumption, not a rounding.")
     add("")
     hdr = ("| Pier | Frame | Deck link | Hcol (ft) | Silo (ft) | H_free (ft) "
-           "| m long. | m trans. |")
-    sep = "|:--|:--|:--|--:|--:|--:|--:|--:|"
+           "| m long. | m trans. | k long. | k trans. |")
+    sep = "|:--|:--|:--|--:|--:|--:|--:|--:|--:|--:|"
     for i in range(n_b):
         lbl = balance.bents[0].label(i) if balance.bents else f"bound {i+1}"
         hdr += f" k [{lbl}] (kip/in) |"
@@ -579,7 +580,8 @@ def balance_report(balance) -> str:
     for b in balance.bents:
         row = (f"| {b.name} | {b.frame} | {b.deck_link} | {b.Hcol/12:.1f} | "
                f"{b.silo/12:.1f} | {b.H_free/12:.1f} | {b.mass_long:.3f} | "
-               f"{b.mass_trans:.3f} |")
+               f"{b.mass_trans:.3f} | {b.stiffness(LONGITUDINAL, 0):.1f} | "
+               f"{b.stiffness(TRANSVERSE, 0):.1f} |")
         for i in range(n_b):
             row += (f" {b.k[i]:.2f} |" if i < len(b.k) else " — |")
         add(row)
@@ -624,8 +626,10 @@ def balance_report(balance) -> str:
     add("## What this section does NOT cover")
     add("")
     add("- The per-bent **seismic** suite runs on the LONGITUDINAL tributary "
-        "mass and the fixed-free cantilever, unchanged by anything above. The "
-        "transverse demand is not checked.")
+        "mass and the fixed-free cantilever, unchanged by anything above — "
+        "including for an integral bent, whose fixed-fixed longitudinal "
+        "stiffness is used for the balance checks only. The transverse demand "
+        "is not checked.")
     add("- A bent inside a continuous frame is still designed as a stand-alone "
         "cantilever, not from the frame's displacement demand.")
     add(f"- {END_CONDITION_NOTE}")

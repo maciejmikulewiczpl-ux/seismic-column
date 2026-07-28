@@ -206,7 +206,8 @@ def _build_bents(results: list[RowResult], order: dict[str, int],
         out.append(bent_stiffness(
             rr.name, rr.frame, order[rr.name], a,
             Hcol=a.Hcol_entered, silo=rr.silo,
-            mass_long=m_long, mass_trans=m_trans, deck_link=rr.deck_link))
+            mass_long=m_long, mass_trans=m_trans, deck_link=rr.deck_link,
+            D_shaft=rr.shaft.D))
     return out
 
 
@@ -309,12 +310,14 @@ def _silo_ctx(bents: list[BentStiffness], results: dict[str, RowResult],
                                rr.assessment.bounds[0].multiplier, b.silo)
         corr[b.name] = (b.k[0] / ke) if ke > 0 else 1.0
 
-    def k_at(b: BentStiffness, silo: float, bound: int) -> float:
+    def k_at(b: BentStiffness, silo: float, bound: int,
+             direction: str = LONGITUDINAL) -> float:
         rr = results[b.name]
         return corr[b.name] * stiffness_at_silo(
             Geometry(Hcol=b.Hcol, D_shaft=rr.shaft.D),
             rr.assessment.EI_col, rr.assessment.EI_shaft,
-            rr.assessment.bounds[bound].multiplier, silo)
+            rr.assessment.bounds[bound].multiplier, silo,
+            end_fixity=b.end_fixity(direction))
 
     def m_at(b: BentStiffness, silo: float, direction: str) -> float:
         rr = results[b.name]
@@ -352,13 +355,19 @@ def _plan_silos(bents: list[BentStiffness], results: dict[str, RowResult],
     k_at, m_at = _silo_ctx(bents, results, cfg, silos)
 
     def soften_to(target_k: float, who: BentStiffness, other: str,
-                  bound: int, rule: str) -> bool:
-        """Plan a silo bringing ``who`` down to ``target_k``.  True if it moved."""
+                  bound: int, rule: str, direction: str) -> bool:
+        """Plan a silo bringing ``who`` down to ``target_k``.  True if it moved.
+
+        ``direction`` selects the end condition, so an integral bent is bisected
+        on its fixed-fixed curve longitudinally and its fixed-free curve
+        transversely — the same member, two different stiffness laws.
+        """
         rr = results[who.name]
         geom = Geometry(Hcol=who.Hcol, D_shaft=rr.shaft.D)
         h = required_silo(geom, rr.assessment.EI_col, rr.assessment.EI_shaft,
                           rr.assessment.bounds[bound].multiplier, target_k,
-                          silo_min=silos[who.name], silo_max=cap)
+                          silo_min=silos[who.name], silo_max=cap,
+                          end_fixity=who.end_fixity(direction))
         if h is None:                      # the cap binds — go as deep as allowed
             notes.append(
                 f"{who.name}: {cfg.max_silo_ft:g} ft silo cap is reached and "
@@ -391,8 +400,8 @@ def _plan_silos(bents: list[BentStiffness], results: dict[str, RowResult],
                         limit = (criteria.k_ratio_min
                                  if (bi.name, bj.name) in near
                                  else criteria.k_ratio_any)
-                        ki = k_at(bi, silos[bi.name], bound)
-                        kj = k_at(bj, silos[bj.name], bound)
+                        ki = k_at(bi, silos[bi.name], bound, direction)
+                        kj = k_at(bj, silos[bj.name], bound, direction)
                         mi = m_at(bi, silos[bi.name], direction)
                         mj = m_at(bj, silos[bj.name], direction)
                         if not (math.isfinite(ki) and math.isfinite(kj)):
@@ -406,14 +415,17 @@ def _plan_silos(bents: list[BentStiffness], results: dict[str, RowResult],
                         if criteria.mass_normalized:
                             target *= m_at(stiff, silos[stiff.name], direction)
                         moved |= soften_to(target, stiff, soft.name, bound,
-                                           f"balanced stiffness ({direction})")
+                                           f"balanced stiffness ({direction})",
+                                           direction)
 
             # --- balanced frame geometry, between adjacent frames ---
             for fi, fj in zip(frames, frames[1:]):
                 for bound in range(min(fi.n_bounds, fj.n_bounds)):
-                    Ki = sum(k_at(b, silos[b.name], bound) for b in fi.members)
+                    Ki = sum(k_at(b, silos[b.name], bound, direction)
+                             for b in fi.members)
                     Mi = sum(m_at(b, silos[b.name], direction) for b in fi.members)
-                    Kj = sum(k_at(b, silos[b.name], bound) for b in fj.members)
+                    Kj = sum(k_at(b, silos[b.name], bound, direction)
+                             for b in fj.members)
                     Mj = sum(m_at(b, silos[b.name], direction) for b in fj.members)
                     if min(Ki, Kj) <= 0 or min(Mi, Mj) <= 0:
                         continue
@@ -427,11 +439,13 @@ def _plan_silos(bents: list[BentStiffness], results: dict[str, RowResult],
                     K_target = Mq * (2.0 * math.pi / T_target) ** 2
                     # take the whole reduction out of the stiffest member
                     who = max(quick.members,
-                              key=lambda b: k_at(b, silos[b.name], bound))
-                    k_who = k_at(who, silos[who.name], bound)
+                              key=lambda b: k_at(b, silos[b.name], bound,
+                                                 direction))
+                    k_who = k_at(who, silos[who.name], bound, direction)
                     k_target = max(k_who - (Kq - K_target), 1e-6)
                     moved |= soften_to(k_target, who, slow.key, bound,
-                                       f"balanced frame geometry ({direction})")
+                                       f"balanced frame geometry ({direction})",
+                                       direction)
         if not moved:
             break
     return silos, dedupe(notes)
@@ -473,7 +487,8 @@ def _plan_silos_min(bents: list[BentStiffness], results: dict[str, RowResult],
         must hold in BOTH directions and at every bound."""
         for direction in DIRECTIONS:
             for bound in range(min(len(bi.k), len(bj.k))):
-                ki, kj = k_at(bi, si, bound), k_at(bj, sj, bound)
+                ki = k_at(bi, si, bound, direction)
+                kj = k_at(bj, sj, bound, direction)
                 mi, mj = m_at(bi, si, direction), m_at(bj, sj, direction)
                 if min(ki, kj) <= 0 or min(mi, mj) <= 0:
                     return False

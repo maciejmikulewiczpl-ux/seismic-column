@@ -60,14 +60,25 @@ COLUMNS: tuple[str, ...] = (
 TEXT_COLUMNS: tuple[str, ...] = ("name", "frame", "deck_link")
 NUMERIC_COLUMNS = tuple(c for c in COLUMNS if c not in TEXT_COLUMNS)
 
-# How the deck attaches at a bent.  This is the physical detail; which
-# directions the bent actually resists in is DERIVED from it (see
-# ``seismic_column.balance.frames_for``):
+# How the deck attaches at a bent.  This is the physical detail; both which
+# directions the bent resists AND its end condition are DERIVED from it (see
+# ``balance.frames_for`` and ``BentStiffness.end_fixity``):
 #
-#   integral  monolithic, fixed moment connection   -> resists long. + trans.
-#   bearing   released longitudinally, shear key    -> resists trans. only
-#   free      no restraint either way               -> resists neither
-DECK_LINKS: tuple[str, ...] = ("integral", "bearing", "free")
+#                     resists long. | resists trans. | end condition
+#   integral   monolithic moment        yes                yes         FIXED-FIXED long.,
+#              connection                                              fixed-free trans.
+#   pinned     bearings restrained      yes                yes         fixed-free both
+#              both ways (no moment)
+#   bearing    released long.,          no                 yes         fixed-free
+#              shear key trans.
+#   free       unrestrained             no                 no          --
+#
+# Only an INTEGRAL bent is fixed-fixed, and only longitudinally: the deep
+# continuous girder holds the column head against rotation as the frame sways
+# along the bridge.  Transversely even an integral single-column bent behaves as
+# a cantilever, so it stays fixed-free.  `pinned` is the default because a
+# simply supported span sits on bearings and transmits no moment.
+DECK_LINKS: tuple[str, ...] = ("integral", "pinned", "bearing", "free")
 
 # Longitudinal / transverse.  Used as dict keys and check labels throughout.
 LONGITUDINAL, TRANSVERSE = "longitudinal", "transverse"
@@ -118,11 +129,15 @@ COLUMN_META: dict[str, tuple[str, str]] = {
                          "the longitudinal weight. Used by the balance checks "
                          "only."),
     "deck_link": ("Deck connection",
-                  "How the deck attaches here: 'integral' (monolithic, fixed "
-                  "moment connection - resists both ways), 'bearing' (released "
-                  "longitudinally, shear key transversely - resists "
-                  "transversely only), or 'free' (resists neither). Drives "
-                  "which bents form a frame in each direction."),
+                  "How the deck attaches here. 'integral' = monolithic moment "
+                  "connection, so the bent is FIXED-FIXED longitudinally "
+                  "(12EI/L3) and fixed-free transversely. 'pinned' = bearings "
+                  "restrained both ways but no moment, fixed-free both ways - "
+                  "the normal simply supported case, and the default. "
+                  "'bearing' = released longitudinally with a shear key, so it "
+                  "resists transversely only. 'free' = resists neither. Drives "
+                  "both the frame layout and the end condition in each "
+                  "direction."),
     "axial_kip": ("Axial load P (kip)",
                   "Sustained axial COMPRESSION on the column section used for "
                   "moment-curvature, P-Delta and shear (the P in the P-M "
@@ -366,7 +381,7 @@ def default_row(name: str = "C1") -> dict:
     return {
         "name": name,
         "frame": "F1",
-        "deck_link": "integral",
+        "deck_link": "pinned",
         "Hcol_ft": 22.0,
         "silo_ft": 0.0,
         "D_shaft_in": 84.0,
@@ -502,8 +517,10 @@ def validate(df: pd.DataFrame, min_shaft_oversize: float = 0.0,
     if legacy_frames:
         df["frame"] = [f"F{i + 1}" for i in range(len(df))]
     # deck_link: how the deck attaches, which derives directional participation
+    # `pinned` (bearings, no moment) is the safe default: it is the simply
+    # supported case and keeps the fixed-free stiffness a legacy table had.
     df["deck_link"] = (df["deck_link"].fillna("").astype(str).str.strip()
-                       .str.lower().replace("", "integral"))
+                       .str.lower().replace("", "pinned"))
     bad_link = sorted(set(df["deck_link"]) - set(DECK_LINKS))
     if bad_link:
         raise ValueError(f"Unknown deck_link {bad_link}; choose from "

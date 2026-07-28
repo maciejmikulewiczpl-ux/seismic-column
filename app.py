@@ -960,6 +960,7 @@ if "summary" in st.session_state:
             for f in frames:
                 row = {"frame": f.key, "bents": " + ".join(f.names),
                        "continuous": "yes" if f.continuous else "—",
+                       "end_condition": f.end_conditions,
                        "M_kip_s2_in": round(f.M(), 3)}
                 for i in range(f.n_bounds):
                     row[f"K [{f.label(i)}]"] = round(f.K(i), 2)
@@ -975,9 +976,10 @@ if "summary" in st.session_state:
                        "Hcol_ft": round(b.Hcol / 12, 1),
                        "silo_ft": round(b.silo / 12, 1),
                        "H_free_ft": round(b.H_free / 12, 1),
+                       "end_fixity": b.end_fixity(direction),
                        "m_kip_s2_in": round(b.mass(direction), 3)}
                 for i in range(len(b.k)):
-                    row[f"k [{b.label(i)}]"] = round(b.k[i], 2)
+                    row[f"k [{b.label(i)}]"] = round(b.stiffness(direction, i), 2)
                     row[f"T [{b.label(i)}]"] = round(b.T(direction, i), 3)
                     row[f"κ [{b.label(i)}]"] = round(
                         b.kappa(direction, i, cr.mass_normalized), 3)

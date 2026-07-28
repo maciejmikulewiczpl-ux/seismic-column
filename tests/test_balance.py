@@ -76,13 +76,14 @@ def test_silo_softens_and_lengthens_the_period():
 # The checks themselves
 # ---------------------------------------------------------------------------
 def _bent(name, k, m=1.0, frame="F1", order=0, m_trans=None,
-          deck_link="integral"):
+          deck_link="pinned", k_fixed=None):
     """A bent with stiffness ``k`` per bound and mass ``m`` (both directions
     unless ``m_trans`` differs)."""
     return BentStiffness(name=name, frame=frame, order=order, Hcol=240.0,
                          silo=0.0, k=tuple(k), mass_long=m,
                          mass_trans=m if m_trans is None else m_trans,
-                         deck_link=deck_link, bound_labels=("3D",) * len(k))
+                         deck_link=deck_link, bound_labels=("3D",) * len(k),
+                         k_fixed=tuple(k_fixed or ()))
 
 
 def _long(checks, name=None):
@@ -762,7 +763,10 @@ def test_legacy_table_migrates_to_simply_supported_frames():
     df["frame"] = "F1"                         # the old default: all one frame
     out = validate(df)
     assert list(out["frame"]) == ["F1", "F2", "F3"]        # one frame per bent
-    assert list(out["deck_link"]) == ["integral"] * 3
+    # `pinned` (bearings, no moment) keeps the fixed-free stiffness a legacy
+    # table had — defaulting to `integral` would silently make every bent
+    # fixed-fixed longitudinally and 4x stiffer
+    assert list(out["deck_link"]) == ["pinned"] * 3
     assert (out["weight_trans_kip"] == out["weight_long_kip"]).all()
     assert any("own frame" in m for m in out.attrs.get("migrations", []))
 
@@ -866,3 +870,68 @@ def test_balance_report_is_complete_and_clean():
     col_txt = column_report(silo_rr)
     assert "Column silo" in col_txt and "H_free" in col_txt
     assert "nan" not in col_txt
+
+
+# ---------------------------------------------------------------------------
+# End condition: integral bents are fixed-fixed LONGITUDINALLY
+# ---------------------------------------------------------------------------
+def test_fixed_fixed_reduces_to_the_code_closed_forms():
+    """A prismatic member must give exactly SDC C7.1.2-1 and C7.1.2-2."""
+    EI = 2.5e9
+    g = Geometry(Hcol=200.0, D_shaft=80.0)
+    L = g.H_free + g.fixity_depth(3.0)
+    free = g.lateral_stiffness(EI, EI, 3.0, "free")
+    fixed = g.lateral_stiffness(EI, EI, 3.0, "fixed")
+    assert free == pytest.approx(3.0 * EI / L ** 3)     # C7.1.2-1
+    assert fixed == pytest.approx(12.0 * EI / L ** 3)   # C7.1.2-2
+    assert fixed / free == pytest.approx(4.0)
+
+
+def test_stepped_member_sits_between_the_two_limits():
+    """The column-on-shaft member is not prismatic, so the fixed-fixed gain is
+    less than the prismatic factor of 4 — the step sits in a different place in
+    the two moment diagrams."""
+    g = Geometry(Hcol=200.0, D_shaft=80.0)
+    free = g.lateral_stiffness(2.0e9, 8.0e9, 3.0, "free")
+    fixed = g.lateral_stiffness(2.0e9, 8.0e9, 3.0, "fixed")
+    assert 1.0 < fixed / free < 4.0
+
+
+def test_fixed_fixed_still_softens_with_a_silo():
+    """required_silo bisects on the stiffness curve, so it must stay monotone
+    under the fixed-fixed end condition too."""
+    g = Geometry(Hcol=216.0, D_shaft=84.0)
+    ks = [Geometry(Hcol=216.0, D_shaft=84.0, silo=h).lateral_stiffness(
+        2.0e9, 6.0e9, 3.0, "fixed") for h in (0.0, 24.0, 48.0, 120.0)]
+    assert ks == sorted(ks, reverse=True)
+
+
+def test_only_integral_bents_are_fixed_longitudinally():
+    for link, lon in (("integral", "fixed"), ("pinned", "free"),
+                      ("bearing", "free"), ("free", "free")):
+        b = _bent("A", [100.0], deck_link=link)
+        assert b.end_fixity(LONGITUDINAL) == lon, link
+        assert b.end_fixity(TRANSVERSE) == "free", link   # never fixed trans.
+
+
+def test_integral_bent_is_stiffer_longitudinally_than_transversely():
+    b = _bent("A", [100.0], deck_link="integral", k_fixed=[285.0])
+    assert b.stiffness(LONGITUDINAL, 0) == 285.0
+    assert b.stiffness(TRANSVERSE, 0) == 100.0
+    # ... and the period follows, for the same mass
+    assert b.T(LONGITUDINAL, 0) < b.T(TRANSVERSE, 0)
+
+
+def test_frame_K_uses_each_members_end_condition():
+    """An integral member brings its fixed-fixed stiffness longitudinally; a
+    bearing member in the same frame brings its fixed-free one."""
+    bents = [_bent("A", [100.0], frame="C1", order=0,
+                   deck_link="integral", k_fixed=[300.0]),
+             _bent("B", [100.0], frame="C1", order=1,
+                   deck_link="pinned")]
+    lon = frames_for(bents, LONGITUDINAL)[0]
+    tra = frames_for(bents, TRANSVERSE)[0]
+    assert lon.K(0) == pytest.approx(400.0)     # 300 fixed-fixed + 100 fixed-free
+    assert tra.K(0) == pytest.approx(200.0)     # both fixed-free
+    assert "fixed-fixed" in lon.end_conditions
+    assert lon.end_conditions != tra.end_conditions

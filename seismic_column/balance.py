@@ -41,11 +41,12 @@ A frame's period is the frame's, not a bent's::
 which is the standard rigid-deck, stand-alone-frame ESA idealisation.  A
 single-bent frame reduces to exactly the bent's own SDOF period.
 
-Member stiffness is the **fixed-free** two-segment cantilever already computed
-for the seismic run — correct transversely, and for every simply supported bent.
-An integral bent is a fixed moment connection and is therefore fixed-fixed
-*longitudinally* (SDC C7.1.2 gives 12EcIeff/L^3 against 3EcIeff/L^3), which this
-module does not yet model; see :data:`END_CONDITION_NOTE`.
+Member stiffness follows the **end condition**, per direction.  An integral
+bent is a moment connection, so longitudinally it is fixed-fixed — SDC C7.1.2-2
+``12EcIeff/L^3`` against C7.1.2-1 ``3EcIeff/L^3``, a factor of 4 on a prismatic
+member.  Transversely even an integral single-column bent behaves as a
+cantilever, and a bent on bearings is fixed-free either way.  See
+:meth:`Geometry.tip_flexibility` for the stepped two-segment solution.
 
 The tuning lever is the **column silo** (isolation casing), which lengthens the
 free column and so softens a stiff pier — Caltrans C7.1.2 / SGS §4.1.4.
@@ -69,11 +70,12 @@ GEOMETRY_CHECK = "Balanced frame geometry (adjacent)"
 # Stated wherever a frame period is reported, because it is an approximation
 # that is NOT conservative in a known direction.
 END_CONDITION_NOTE = (
-    "Member stiffness is the fixed-free cantilever (SDC C7.1.2-1, 3EcIeff/L³). "
-    "That is right transversely and for every simply supported bent, but an "
-    "integral bent is a fixed moment connection and so is fixed-fixed "
-    "longitudinally (C7.1.2-2, 12EcIeff/L³). Longitudinal K_frame is therefore "
-    "understated and T_long overstated for a continuous frame."
+    "Member stiffness follows the end condition: an integral (moment-connected) "
+    "bent is FIXED-FIXED longitudinally (SDC C7.1.2-2, 12EcIeff/L³ prismatic), "
+    "while a bent on bearings, and any bent transversely, is fixed-free "
+    "(C7.1.2-1, 3EcIeff/L³). The depth to fixity Df is itself derived for a "
+    "free-head member, so re-using it with a fixed head is the usual "
+    "simplification rather than an exact equivalence."
 )
 
 
@@ -98,9 +100,11 @@ class BalanceCriteria:
 class BentStiffness:
     """One pier's balance-relevant state, evaluated at every fixity bound.
 
-    ``k`` is direction-independent — a circular column on a circular shaft is
-    axisymmetric — so only the mass, and hence the period and ``kappa``, differ
-    between longitudinal and transverse.
+    The SECTION is axisymmetric — a circular column on a circular shaft — so
+    the stiffness differs by direction only through the **end condition**: an
+    integral (moment-connected) bent is fixed-fixed longitudinally, everything
+    else is a fixed-free cantilever.  Mass differs by direction too, so the
+    period and ``kappa`` do on both counts.
     """
 
     name: str
@@ -108,11 +112,14 @@ class BentStiffness:
     order: int                       # position along the bridge (table row order)
     Hcol: float                      # entered clear height, in
     silo: float                      # column silo depth, in
-    k: tuple[float, ...]             # effective lateral stiffness per bound, kip/in
+    k: tuple[float, ...]             # FIXED-FREE stiffness per bound, kip/in
     mass_long: float = float("nan")  # tributary mass restrained longitudinally
     mass_trans: float = float("nan")  # ... and transversely, kip*s^2/in
-    deck_link: str = "integral"
+    deck_link: str = "pinned"
     bound_labels: tuple[str, ...] = ()
+    # Fixed-FIXED stiffness per bound, used longitudinally for an integral bent.
+    # Defaults to the fixed-free values when the caller has not computed it.
+    k_fixed: tuple[float, ...] = ()
 
     @property
     def H_free(self) -> float:
@@ -135,9 +142,25 @@ class BentStiffness:
             return direction == TRANSVERSE
         return True                                   # integral
 
+    def end_fixity(self, direction: str) -> str:
+        """Rotational restraint at the deck: ``'fixed'`` or ``'free'``.
+
+        Only an integral bent swaying LONGITUDINALLY is fixed-fixed — the deep
+        continuous girder holds the column head against rotation.  Transversely
+        even an integral single-column bent behaves as a cantilever.
+        """
+        return ("fixed" if self.deck_link == "integral"
+                and direction == LONGITUDINAL else "free")
+
+    def stiffness(self, direction: str, bound: int) -> float:
+        """Effective lateral stiffness in ``direction``, kip/in."""
+        if self.end_fixity(direction) == "fixed" and bound < len(self.k_fixed):
+            return self.k_fixed[bound]
+        return self.k[bound]
+
     def T(self, direction: str, bound: int) -> float:
         """Effective SDOF period of this bent alone in ``direction``, s."""
-        k, m = self.k[bound], self.mass(direction)
+        k, m = self.stiffness(direction, bound), self.mass(direction)
         if not (math.isfinite(k) and math.isfinite(m)) or k <= 0 or m <= 0:
             return float("nan")
         return 2.0 * math.pi * math.sqrt(m / k)
@@ -145,7 +168,7 @@ class BentStiffness:
     def kappa(self, direction: str, bound: int,
               mass_normalized: bool = True) -> float:
         """Stiffness (or stiffness-to-mass) ratio parameter at ``bound``."""
-        k = self.k[bound]
+        k = self.stiffness(direction, bound)
         if not mass_normalized:
             return k
         m = self.mass(direction)
@@ -180,8 +203,19 @@ class Frame:
         return min((len(b.k) for b in self.members), default=0)
 
     def K(self, bound: int) -> float:
-        """Frame lateral stiffness, kip/in — rigid deck, so the members add."""
-        return sum(b.k[bound] for b in self.members)
+        """Frame lateral stiffness, kip/in — rigid deck, so the members add.
+
+        Each member contributes at ITS end condition in this direction, so an
+        integral bent brings its fixed-fixed stiffness longitudinally.
+        """
+        return sum(b.stiffness(self.direction, bound) for b in self.members)
+
+    @property
+    def end_conditions(self) -> str:
+        """e.g. ``'fixed-fixed'`` or ``'fixed-free'``, or a mix."""
+        kinds = {("fixed-fixed" if b.end_fixity(self.direction) == "fixed"
+                  else "fixed-free") for b in self.members}
+        return " / ".join(sorted(kinds))
 
     def M(self) -> float:
         """Frame tributary mass in this direction, kip*s^2/in."""
@@ -271,8 +305,8 @@ class BalanceResult:
 # ---------------------------------------------------------------------------
 def bent_stiffness(name: str, frame: str, order: int, assessment,
                    Hcol: float, silo: float, mass_long: float,
-                   mass_trans: float, deck_link: str = "integral"
-                   ) -> BentStiffness:
+                   mass_trans: float, deck_link: str = "pinned",
+                   D_shaft: float = 0.0) -> BentStiffness:
     """Collect a row's stiffnesses straight off its assessment bounds.
 
     No new mechanics: ``k`` is the effective (cracked, ``EI = Mp/phi_y``) lateral
@@ -291,11 +325,21 @@ def bent_stiffness(name: str, frame: str, order: int, assessment,
             continue
         seen.add(lbl)
         keep.append(i)
+    # An integral bent is fixed-fixed longitudinally, so it needs the second
+    # stiffness.  Same geometry, same cracked EI — only the head restraint
+    # differs, so it costs one closed-form evaluation per bound.
+    k_fixed: tuple[float, ...] = ()
+    if deck_link == "integral" and D_shaft > 0:
+        geom = Geometry(Hcol=Hcol, D_shaft=D_shaft, silo=silo)
+        k_fixed = tuple(
+            geom.lateral_stiffness(assessment.EI_col, assessment.EI_shaft,
+                                   bounds[i].multiplier, end_fixity="fixed")
+            for i in keep)
     return BentStiffness(
         name=name, frame=frame, order=order, Hcol=Hcol, silo=silo,
         k=tuple(bounds[i].stiffness for i in keep),
         mass_long=mass_long, mass_trans=mass_trans, deck_link=deck_link,
-        bound_labels=tuple(labels[i] for i in keep),
+        bound_labels=tuple(labels[i] for i in keep), k_fixed=k_fixed,
     )
 
 
@@ -432,20 +476,22 @@ def balance_checks(bents: list[BentStiffness],
 # Sizing a column silo
 # ---------------------------------------------------------------------------
 def stiffness_at_silo(geometry: Geometry, EI_col: float, EI_shaft: float,
-                      multiplier: float, silo: float) -> float:
-    """Elastic lateral stiffness of the two-segment cantilever at silo ``silo``.
+                      multiplier: float, silo: float,
+                      end_fixity: str = "free") -> float:
+    """Elastic lateral stiffness of the two-segment member at silo ``silo``.
 
     Reuses :meth:`Geometry.lateral_stiffness` with the silo swapped in, holding
-    ``EI`` fixed.  Monotonically decreasing in ``silo``.
+    ``EI`` fixed.  Monotonically decreasing in ``silo`` under either end
+    condition, which is what lets :func:`required_silo` bisect on it.
     """
     return replace(geometry, silo=silo).lateral_stiffness(
-        EI_col, EI_shaft, multiplier)
+        EI_col, EI_shaft, multiplier, end_fixity=end_fixity)
 
 
 def required_silo(geometry: Geometry, EI_col: float, EI_shaft: float,
                   multiplier: float, k_target: float,
                   silo_min: float = 0.0, silo_max: float = 240.0,
-                  tol: float = 1e-3) -> float | None:
+                  tol: float = 1e-3, end_fixity: str = "free") -> float | None:
     """Silo depth (in) that softens this pier to ``k_target`` (kip/in).
 
     Bisection on the elastic two-segment cantilever — no moment-curvature and no
@@ -460,15 +506,19 @@ def required_silo(geometry: Geometry, EI_col: float, EI_shaft: float,
     """
     if silo_max <= silo_min:
         return silo_min if stiffness_at_silo(
-            geometry, EI_col, EI_shaft, multiplier, silo_min) <= k_target else None
-    if stiffness_at_silo(geometry, EI_col, EI_shaft, multiplier, silo_min) <= k_target:
+            geometry, EI_col, EI_shaft, multiplier, silo_min,
+            end_fixity) <= k_target else None
+    if stiffness_at_silo(geometry, EI_col, EI_shaft, multiplier, silo_min,
+                         end_fixity) <= k_target:
         return silo_min
-    if stiffness_at_silo(geometry, EI_col, EI_shaft, multiplier, silo_max) > k_target:
+    if stiffness_at_silo(geometry, EI_col, EI_shaft, multiplier, silo_max,
+                         end_fixity) > k_target:
         return None                                   # unreachable within the cap
     lo, hi = silo_min, silo_max                       # k(lo) > target >= k(hi)
     while hi - lo > tol:
         mid = 0.5 * (lo + hi)
-        if stiffness_at_silo(geometry, EI_col, EI_shaft, multiplier, mid) > k_target:
+        if stiffness_at_silo(geometry, EI_col, EI_shaft, multiplier, mid,
+                             end_fixity) > k_target:
             lo = mid
         else:
             hi = mid
