@@ -155,13 +155,23 @@ def bent_stiffness(name: str, frame: str, order: int, assessment,
     displacement demand, and ``T`` the effective period that goes with it.
     """
     bounds = assessment.bounds
+    labels = [b.soil_label or f"{b.multiplier:.2g}·D_shaft" for b in bounds]
+    # Collapse duplicate bounds.  Setting both soil brackets to the same factor
+    # (or both fixity multipliers to the same value) makes evaluate_column run
+    # the identical analysis twice, which would otherwise double every check,
+    # every table row and every legend entry for no information.
+    keep, seen = [], set()
+    for i, lbl in enumerate(labels):
+        if lbl in seen:
+            continue
+        seen.add(lbl)
+        keep.append(i)
     return BentStiffness(
         name=name, frame=frame, order=order, Hcol=Hcol, silo=silo,
         mass=bounds[0].demand.mass if bounds else float("nan"),
-        k=tuple(b.stiffness for b in bounds),
-        T=tuple(b.demand.period for b in bounds),
-        bound_labels=tuple(b.soil_label or f"{b.multiplier:.2g}·D_shaft"
-                           for b in bounds),
+        k=tuple(bounds[i].stiffness for i in keep),
+        T=tuple(bounds[i].demand.period for i in keep),
+        bound_labels=tuple(labels[i] for i in keep),
     )
 
 

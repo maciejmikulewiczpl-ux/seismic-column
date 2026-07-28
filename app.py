@@ -753,15 +753,27 @@ def _profile_fig(bents, value_of, ylabel, status):
                                   ec="none", alpha=0.85), zorder=4)
 
     marks = ["o", "s", "^"]
+    siloed = [b.silo > 0 for b in bents]
     for bnd in range(n_bounds):
         ys = [value_of(b, bnd) for b in bents]
-        ax.plot(range(len(bents)), ys, ls="none", marker=marks[bnd % len(marks)],
+        mk = marks[bnd % len(marks)]
+        # hollow marker = as-built height; filled = a silo was added here
+        ax.plot(range(len(bents)), ys, ls="none", marker=mk,
                 ms=8, mfc="white", mec=_INK, mew=1.4, zorder=3,
                 label=bents[0].label(bnd))
+        xs_s = [i for i, s in enumerate(siloed) if s]
+        if xs_s:
+            ax.plot(xs_s, [ys[i] for i in xs_s], ls="none", marker=mk,
+                    ms=8, mfc=_INK, mec=_INK, mew=1.4, zorder=4)
 
     ax.set_xticks(range(len(bents)))
-    ax.set_xticklabels([b.name for b in bents])
-    ax.set_xlabel("pier (in table order)")
+    # the silo depth rides on the pier axis: always visible, never over the data
+    ax.set_xticklabels([f"{b.name}\n+{b.silo / 12:g} ft" if b.silo > 0 else b.name
+                        for b in bents])
+    total = sum(b.silo for b in bents) / 12.0
+    ax.set_xlabel("pier (in table order)"
+                  + (f"  ·  filled = silo added, {total:g} ft total"
+                     if total else "  ·  no silos"))
     # The check is a RATIO, so a log axis makes it read directly: the same ratio
     # is the same vertical distance anywhere on the plot, and a stiff short pier
     # no longer squashes its flexible neighbours into the baseline.
@@ -919,12 +931,19 @@ if "summary" in st.session_state:
             # --- along the bridge: each adjacent LINK drawn pass/fail ---
             k_status = _bound_status(balance, STIFFNESS_CHECK)
             t_status = _bound_status(balance, GEOMETRY_CHECK)
+            _silo_ft = {b.name: b.silo / 12.0 for b in balance.bents if b.silo > 0}
+            _silo_txt = (
+                "  Silo depths are on the pier axis (filled marker = silo): "
+                + ", ".join(f"**{n} +{v:g} ft**" for n, v in _silo_ft.items())
+                + f" — **{sum(_silo_ft.values()):g} ft total** over "
+                  f"{len(_silo_ft)} pier(s)."
+            ) if _silo_ft else "  No silo was added."
             st.markdown(
                 f"**Along the bridge.** Markers are piers, one per fixity "
                 f"bound; the line between two piers is the adjacent-pair check "
                 f"itself — plain grey where it complies, dashed red with "
                 f"`✗ ratio` where it does not. Unlinked neighbours are in "
-                f"different frames.")
+                f"different frames." + _silo_txt)
             bk1, bk2 = st.columns(2)
             bk1.pyplot(_profile_fig(
                 balance.bents,

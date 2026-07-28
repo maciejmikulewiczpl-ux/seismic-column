@@ -342,6 +342,25 @@ def test_balance_progress_is_separate_from_the_row_progress_count():
     assert msgs and all("Balancing pass" in m for m in msgs)
 
 
+def test_identical_bounds_are_collapsed():
+    """Equal stiff/soft brackets make evaluate_column run the same analysis
+    twice; the balance layer must not double every check because of it."""
+    df = default_dataframe(2)
+    df["mult_lb"] = 4.0
+    df["mult_ub"] = 4.0                       # both bounds identical
+    out = run_batch_balanced(df, _cfg(optimize=False, balance_auto_silo=False))
+    assert len(out.results[0].assessment.bounds) == 2      # analysis still runs 2
+    assert len(out.balance.bents[0].k) == 1                # but only 1 is reported
+    assert len(out.balance.bents[0].bound_labels) == 1
+    # one pair x one bound x two check types
+    assert len(out.balance.checks) == 2
+
+    df2 = default_dataframe(2)                # distinct bounds are all kept
+    out2 = run_batch_balanced(df2, _cfg(optimize=False, balance_auto_silo=False))
+    assert len(out2.balance.bents[0].k) == 2
+    assert len(out2.balance.checks) == 4
+
+
 def test_period_rule_alone_drives_a_silo():
     """Regression: with mass normalisation OFF the stiffness and period rules
     decouple, so the period rule can be the ONLY thing failing.  The silo
