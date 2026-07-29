@@ -266,3 +266,31 @@ def test_ratio_and_ductility_are_consistent():
 def test_worst_is_the_minimum_ratio_over_the_members():
     fc = _run(TRANSVERSE, ["integral", "integral", "integral"])
     assert fc.worst == pytest.approx(min(m.ratio for m in fc.members))
+
+
+# --- geometry chart is keyed on FRAMES, not bents ---------------------------
+def test_geometry_checks_pair_frames_and_orphan_nobody():
+    """Every frame is an endpoint of a link, and every pier sits in a frame.
+
+    The old chart resolved a frame to its first member, so the other members of
+    a continuous frame were never a link endpoint and drew with no line at all.
+    """
+    from seismic_column.balance import (BalanceCriteria, GEOMETRY_CHECK,
+                                        balance_checks, frames_for)
+    bents = [_bent(f"P{i}", link) for i, link in enumerate(
+        ["pinned", "pinned", "bearing", "integral", "integral", "bearing",
+         "pinned"])]
+    for i, b in enumerate(bents):
+        b.order = i
+        b.frame = "C1" if 2 <= i <= 5 else f"F{i}"
+    checks = balance_checks(bents, BalanceCriteria())
+    for direction in (LONGITUDINAL, TRANSVERSE):
+        frames = frames_for(bents, direction)
+        keys = {f.key for f in frames}
+        geo = [c for c in checks
+               if c.name == GEOMETRY_CHECK and c.direction == direction]
+        linked = {k for c in geo for k in c.pair}
+        assert linked <= keys                    # every pair resolves to a frame
+        assert {f.key for f in frames} == linked  # and no frame is left out
+        covered = {n for f in frames for n in f.names}
+        assert covered == {b.name for b in bents}

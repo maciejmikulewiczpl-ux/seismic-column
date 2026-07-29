@@ -26,6 +26,7 @@ from .demand import (
     magnified_demand,
 )
 from .geometry import Geometry
+from .io_schema import LONGITUDINAL, TRANSVERSE
 from .materials import bar_diameter
 from .moment_curvature import MomentCurvature, moment_curvature
 from .pile_solver import PileSolution, solve_lateral
@@ -384,6 +385,30 @@ class BoundResult:
 
 
 @dataclass
+class DirectionalResult:
+    """One direction's demand-side result for a bent.
+
+    Capacity is direction-independent here — the section is axisymmetric and the
+    p-y solves run at ``F_y = Mp/H_free`` and ``Vo = Mo/H_free``, none of which
+    see the mass.  Only the tributary mass differs, so only the period, the
+    spectral acceleration, the displacement demand and everything downstream of
+    them (``mu_d``, P-Delta, and the shear capacity that degrades with ``mu_d``)
+    change between directions.
+    """
+
+    direction: str
+    weight_entered: float          # entered tributary weight for this direction
+    weight_mass: float             # ... plus participating self-weight, kip
+    bounds: list[BoundResult]
+    governing_bound: BoundResult
+    checks: list[Check]
+
+    @property
+    def passed(self) -> bool:
+        return all(c.passed for c in self.checks)
+
+
+@dataclass
 class ColumnAssessment:
     mc_col: MomentCurvature
     mc_shaft: MomentCurvature
@@ -412,6 +437,19 @@ class ColumnAssessment:
     inground_shear: float = 0.0                # max |V| below ground at Mo, kip
     Hcol_entered: float = 0.0                  # entered column clear height, in
     silo: float = 0.0                          # column silo (isolation casing) depth, in
+    # Per-direction demand results.  Always holds "longitudinal"; holds
+    # "transverse" too when a transverse weight was supplied, in which case
+    # ``checks`` above is the ENVELOPE of the two and the row passes only if
+    # both directions do.  ``bounds``/``governing_bound``/``weight_mass`` stay
+    # longitudinal so existing consumers are unaffected.
+    directions: dict[str, DirectionalResult] = field(default_factory=dict)
+
+    def direction(self, name: str) -> DirectionalResult | None:
+        return self.directions.get(name)
+
+    @property
+    def two_direction(self) -> bool:
+        return len(self.directions) > 1
 
     @property
     def H_free(self) -> float:
@@ -468,6 +506,51 @@ def inground_demand(Hcol, L_embed, EI_col, EI_shaft, D_shaft, axial,
     return M, V, gov
 
 
+def _envelope_checks(directions: dict[str, DirectionalResult]) -> list[Check]:
+    """The worse of each named check across the directions that were run.
+
+    Deliberately generic: it does NOT enumerate which checks are
+    direction-sensitive.  Capacity-protection and detailing checks come out
+    numerically identical in both directions (they are driven by Mp/Mo and
+    geometry, not mass) and collapse on their own; only the demand-driven ones
+    — displacement, ductility, shear, P-Delta, LLE — actually differ, and there
+    the larger ``demand/capacity`` ratio wins.  A failing check always beats a
+    passing one even if the ratio comparison is degenerate (infinite ratios from
+    a zero capacity would otherwise tie).
+
+    Ties resolve to the FIRST direction seen (longitudinal), so a run with only
+    one direction is byte-for-byte what it was before.
+    """
+    order = list(directions)
+    if len(order) == 1:
+        return list(directions[order[0]].checks)
+
+    merged: dict[str, tuple[str, Check]] = {}
+    for name in order:
+        for c in directions[name].checks:
+            prev = merged.get(c.name)
+            if prev is None:
+                merged[c.name] = (name, c)
+                continue
+            _, pc = prev
+            worse = (pc.passed and not c.passed) or (
+                pc.passed == c.passed and c.ratio > pc.ratio)
+            if worse:
+                merged[c.name] = (name, c)
+
+    out: list[Check] = []
+    for direction, c in merged.values():
+        # Only say which direction governs when the two actually differ, so the
+        # direction-independent checks stay quiet.
+        others = [o.checks for n, o in directions.items() if n != direction]
+        differs = any(
+            abs(x.ratio - c.ratio) > 1e-9 or x.passed != c.passed
+            for lst in others for x in lst if x.name == c.name)
+        out.append(replace(c, note=(f"{c.note}  [{direction} governs]".strip()
+                                    if differs else c.note)))
+    return out
+
+
 def evaluate_column(
     column: CircularSection,
     shaft: CircularSection,
@@ -475,6 +558,7 @@ def evaluate_column(
     spectrum: DesignSpectrum,
     axial: float,
     weight: float,
+    weight_trans: float | None = None,
     fixity_multipliers: tuple[float, ...] = (3.0, 6.0),
     mu_d_limit: float = MU_D_LIMIT_SINGLE,
     rho_l_min: float = 0.01,
@@ -567,47 +651,57 @@ def evaluate_column(
     else:
         raise ValueError("fixity_source must be 'multiplier' or 'soil'")
 
-    bounds: list[BoundResult] = []
-    for mult, soil_sol, soil_lbl in bound_specs:
-        k = geometry.lateral_stiffness(EI_col, EI_shaft, mult)
-        demand = displacement_demand(spectrum, k, weight_mass)
+    def _demand_pass(w_mass: float) -> tuple[list[BoundResult], BoundResult]:
+        """Bounds and governing bound for one tributary mass.
 
-        # displacement capacity: hinge at top of shaft (bottom of the silo,
-        # if any), arm = H_free
-        delta_y = F_y * geometry.tip_flexibility(EI_col, EI_shaft, mult)
-        theta_p = Lp * (mc_col.phi_u - mc_col.phi_y)
-        delta_p = theta_p * (geometry.H_free - Lp / 2.0)
-        delta_c = delta_y + delta_p
-        mu_capacity = delta_c / delta_y if delta_y > 0 else float("nan")
-        # SGS 4.3.3: magnify the elastic displacement demand for short-period
-        # structures (equal-displacement does not hold there).  Caltrans SDC
-        # has no equivalent, so this is gated on the selected code.
-        if provisions.short_period_magnification:
-            demand = magnified_demand(demand, spectrum, delta_y)
-        mu_demand = demand.disp_demand / delta_y if delta_y > 0 else float("nan")
+        Everything expensive is already done and shared: ``bound_specs`` holds
+        the p-y solves (run at F_y, which has no mass in it), and mc/Lp/Mo are
+        fixed.  So a second direction costs only this arithmetic.
+        """
+        bounds: list[BoundResult] = []
+        for mult, soil_sol, soil_lbl in bound_specs:
+            k = geometry.lateral_stiffness(EI_col, EI_shaft, mult)
+            demand = displacement_demand(spectrum, k, w_mass)
 
-        Df = geometry.fixity_depth(mult)
-        shaft_moment_fixity = Mo * (geometry.H_free + Df) / geometry.H_free
-
-        lle_demand = None
-        mu_lle = None
-        if lle_spectrum is not None:
-            lle_demand = displacement_demand(lle_spectrum, k, weight_mass)
+            # displacement capacity: hinge at top of shaft (bottom of the silo,
+            # if any), arm = H_free
+            delta_y = F_y * geometry.tip_flexibility(EI_col, EI_shaft, mult)
+            theta_p = Lp * (mc_col.phi_u - mc_col.phi_y)
+            delta_p = theta_p * (geometry.H_free - Lp / 2.0)
+            delta_c = delta_y + delta_p
+            mu_capacity = delta_c / delta_y if delta_y > 0 else float("nan")
+            # SGS 4.3.3: magnify the elastic displacement demand for short-period
+            # structures (equal-displacement does not hold there).  Caltrans SDC
+            # has no equivalent, so this is gated on the selected code.
             if provisions.short_period_magnification:
-                lle_demand = magnified_demand(lle_demand, lle_spectrum, delta_y)
-            mu_lle = lle_demand.disp_demand / delta_y if delta_y > 0 else float("nan")
+                demand = magnified_demand(demand, spectrum, delta_y)
+            mu_demand = demand.disp_demand / delta_y if delta_y > 0 else float("nan")
 
-        bounds.append(BoundResult(
-            multiplier=mult, fixity_depth=Df, Le=geometry.effective_length(mult),
-            stiffness=k, demand=demand, delta_y=delta_y, delta_p=delta_p,
-            delta_c=delta_c, mu_capacity=mu_capacity, mu_demand=mu_demand,
-            shaft_moment_interface=Mo, shaft_moment_fixity=shaft_moment_fixity,
-            lle_demand=lle_demand, mu_lle=mu_lle,
-            soil_solution=soil_sol, soil_label=soil_lbl,
-        ))
+            Df = geometry.fixity_depth(mult)
+            shaft_moment_fixity = Mo * (geometry.H_free + Df) / geometry.H_free
 
-    # governing bound = largest displacement-demand/capacity ratio
-    governing = max(bounds, key=lambda b: b.demand.disp_demand / b.delta_c)
+            lle_demand = None
+            mu_lle = None
+            if lle_spectrum is not None:
+                lle_demand = displacement_demand(lle_spectrum, k, w_mass)
+                if provisions.short_period_magnification:
+                    lle_demand = magnified_demand(lle_demand, lle_spectrum, delta_y)
+                mu_lle = lle_demand.disp_demand / delta_y if delta_y > 0 else float("nan")
+
+            bounds.append(BoundResult(
+                multiplier=mult, fixity_depth=Df, Le=geometry.effective_length(mult),
+                stiffness=k, demand=demand, delta_y=delta_y, delta_p=delta_p,
+                delta_c=delta_c, mu_capacity=mu_capacity, mu_demand=mu_demand,
+                shaft_moment_interface=Mo, shaft_moment_fixity=shaft_moment_fixity,
+                lle_demand=lle_demand, mu_lle=mu_lle,
+                soil_solution=soil_sol, soil_label=soil_lbl,
+            ))
+
+        # governing bound = largest displacement-demand/capacity ratio
+        return bounds, max(bounds,
+                           key=lambda b: b.demand.disp_demand / b.delta_c)
+
+    bounds, governing = _demand_pass(weight_mass)
 
     # --- in-ground shaft demand at column OVERSTRENGTH (soil mode) ---
     # Apply Vo = Mo/H_free so the column develops Mo at the top of shaft; the p-y
@@ -623,12 +717,24 @@ def evaluate_column(
             geometry.H_free, L_embed, EI_col, EI_shaft, geometry.D_shaft, P_used,
             soil_profile, Vo, soil_bounds)
 
-    checks = _build_checks(
-        column, shaft, geometry, mc_col, mc_shaft, Lp, Mo, P_used, shaft_axial,
-        bounds, governing, mu_d_limit, rho_l_min, rho_l_max, shaft_moment_basis,
-        lle_spectrum is not None, lle_mu_limit, provisions,
-        inground_M, inground_V,
-    )
+    def _checks_for(bnds, gov):
+        return _build_checks(
+            column, shaft, geometry, mc_col, mc_shaft, Lp, Mo, P_used,
+            shaft_axial, bnds, gov, mu_d_limit, rho_l_min, rho_l_max,
+            shaft_moment_basis, lle_spectrum is not None, lle_mu_limit,
+            provisions, inground_M, inground_V,
+        )
+
+    directions = {LONGITUDINAL: DirectionalResult(
+        LONGITUDINAL, weight, weight_mass, bounds, governing,
+        _checks_for(bounds, governing))}
+    if weight_trans is not None:
+        w_trans_mass = weight_trans + self_weight_mass_factor * W_self
+        t_bounds, t_gov = _demand_pass(w_trans_mass)
+        directions[TRANSVERSE] = DirectionalResult(
+            TRANSVERSE, weight_trans, w_trans_mass, t_bounds, t_gov,
+            _checks_for(t_bounds, t_gov))
+    checks = _envelope_checks(directions)
     # Guard the overstrength-path gap: if every stiffness bound stayed stable but
     # the (larger) Vo in-ground solve went unstable/singular on all bounds, the
     # below-ground shaft demand was never established — fail explicitly instead
@@ -645,7 +751,7 @@ def evaluate_column(
     return ColumnAssessment(
         mc_col=mc_col, mc_shaft=mc_shaft, Lp=Lp, EI_col=EI_col, EI_shaft=EI_shaft,
         Ieff_col=Ieff_col, Ieff_shaft=Ieff_shaft, Ig_col=Ig_col, Ig_shaft=Ig_shaft,
-        Mo=Mo, bounds=bounds, checks=checks, governing_bound=governing,
+        Mo=Mo, bounds=bounds, checks=checks, governing_bound=governing, directions=directions,
         W_self=W_self, P_used=P_used, weight_mass=weight_mass,
         axial_entered=axial, weight_entered=weight, provisions=provisions,
         soil_profile=(soil_profile if fixity_source == "soil" else None),

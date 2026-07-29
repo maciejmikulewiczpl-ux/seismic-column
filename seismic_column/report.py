@@ -360,6 +360,58 @@ def column_report(rr: RowResult) -> str:
     add(f"- Shaft diameter D_shaft = {s.D:.0f} in")
     add("")
 
+    if len(a.directions) > 1:
+        add("## Direction")
+        add("")
+        add("**Both directions are checked; this column passes only if both "
+            "do.** Capacity is direction-independent here — the section is "
+            "axisymmetric and the p-y solves run at `F_y = Mp/H_free` and "
+            "`Vo = Mo/H_free`, neither of which contains the mass. So Δy, Δp, "
+            "Δc, Lp, Df, Mo, Vo, every p-y diagram, the in-ground shaft demand "
+            "and all detailing are stated **once** below and hold both ways. "
+            "Only the tributary mass differs, and with it T, Sa, Δd, μd, P-Δ "
+            "and any shear capacity that degrades with μd.")
+        add("")
+        add("| Direction | W entered (kip) | W + self-wt | T (s) | Sa (g) "
+            "| Δd (in) | Δc (in) | Δc/Δd | μd | |")
+        add("|:--|--:|--:|--:|--:|--:|--:|--:|--:|:--|")
+        for dname, dres in a.directions.items():
+            g = dres.governing_bound
+            add(f"| {dname} | {dres.weight_entered:.0f} "
+                f"| {dres.weight_mass:.0f} | {g.demand.period:.3f} "
+                f"| {g.demand.Sa:.4f} | {g.demand.disp_demand:.2f} "
+                f"| {g.delta_c:.2f} "
+                f"| {g.delta_c / g.demand.disp_demand:.2f} "
+                f"| {g.mu_demand:.2f} "
+                f"| {'PASS ✅' if dres.passed else 'FAIL ❌'} |")
+        add("")
+        names = sorted({c.name for c in a.checks})
+        diff = []
+        for n in names:
+            per = {dn: next((c for c in o.checks if c.name == n), None)
+                   for dn, o in a.directions.items()}
+            vals = [c.ratio for c in per.values() if c is not None]
+            if len(vals) > 1 and abs(max(vals) - min(vals)) > 1e-9:
+                diff.append((n, per))
+        if diff:
+            add(f"**Checks that differ by direction ({len(diff)} of "
+                f"{len(names)}).** The rest come out numerically identical "
+                "because they are driven by Mp/Mo and geometry, not mass.")
+            add("")
+            add("| Check | " + " | ".join(f"{dn} D/C" for dn in a.directions)
+                + " | Governs |")
+            add("|:--|" + "--:|" * len(a.directions) + ":--|")
+            for n, per in diff:
+                worst = max(per, key=lambda dn: per[dn].ratio)
+                add(f"| {n} | "
+                    + " | ".join(f"{per[dn].ratio:.4f}" for dn in a.directions)
+                    + f" | {worst} |")
+            add("")
+        add("The **Checks** section below is the ENVELOPE of the two — the "
+            "worse of each named check, with the governing direction noted "
+            "where they disagree.")
+        add("")
+
     add("## Column section")
     add("")
     add(f"- Diameter: {d.D:.0f} in")

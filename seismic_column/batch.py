@@ -150,6 +150,7 @@ def run_row(row: pd.Series, cfg: GlobalConfig, on_candidate=None,
         )
         res: OptimizeResult = optimize_column(
             column, shaft, geometry, spectrum, axial, weight, spec=spec,
+            weight_trans=w_trans,
             fixity_multipliers=mults, shaft_moment_basis=cfg.shaft_moment_basis,
             lle_spectrum=lle_spectrum, lle_mu_limit=cfg.lle_mu_limit,
             concrete_unit_weight=cfg.concrete_unit_weight,
@@ -163,6 +164,7 @@ def run_row(row: pd.Series, cfg: GlobalConfig, on_candidate=None,
 
     assessment = evaluate_column(
         column.section(), shaft.section(), geometry, spectrum, axial, weight,
+        weight_trans=w_trans,
         fixity_multipliers=mults, mu_d_limit=mu_d_limit,
         rho_l_min=rho_l_min, rho_l_max=rho_l_max,
         shaft_moment_basis=cfg.shaft_moment_basis,

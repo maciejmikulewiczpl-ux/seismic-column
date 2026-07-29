@@ -838,6 +838,101 @@ def _profile_fig(bents, value_of, ylabel, status):
     return fig
 
 
+def _frame_profile_fig(bents, frames, status, ylabel="T (s)"):
+    """Frame period along the bridge, with each adjacent-FRAME link drawn.
+
+    The geometry rule compares FRAMES, not bents, so this chart has to be drawn
+    on frames or the picture lies.  Plotting per-bent periods and linking a
+    frame by its first member — which is what the shared ``_profile_fig`` did —
+    put endpoints on the chart that were not the numbers being compared, and
+    left every other member of a continuous frame with no line touching it.
+
+    The pier axis is kept so the chart still reads along the bridge, but a
+    continuous frame is drawn as a horizontal SEGMENT spanning its members at
+    the single frame period: `[A8 A9 A10]` reads as a plateau, which is exactly
+    what "these three share one period" means.
+    """
+    fig, ax = plt.subplots(figsize=(5.4, 3.4))
+    idx = {b.name: i for i, b in enumerate(bents)}
+    n_bounds = min((f.n_bounds for f in frames), default=0)
+    marks = ["o", "s", "^"]
+
+    def span(f):
+        xs = [idx[n] for n in f.names if n in idx]
+        return (min(xs), max(xs)) if xs else (0, 0)
+
+    # --- links between adjacent frames: from the right edge of one to the left
+    #     edge of the next, so the line never runs back through a frame ---
+    by_key = {f.key: f for f in frames}
+    for (ki, kj, bnd), c in sorted(status.items(), key=lambda kv: kv[0][2]):
+        fi, fj = by_key.get(ki), by_key.get(kj)
+        if fi is None or fj is None or bnd >= n_bounds:
+            continue
+        xi, xj = span(fi)[1], span(fj)[0]
+        yi, yj = fi.T(bnd), fj.T(bnd)
+        ax.plot([xi, xj], [yi, yj], color=_BAD if not c.passed else _OK,
+                ls="--" if not c.passed else "-", lw=2.0, zorder=2,
+                solid_capstyle="round")
+        if not c.passed:
+            dy = 9 if bnd % 2 == 0 else -14
+            mid = math.sqrt(yi * yj) if min(yi, yj) > 0 else (yi + yj) / 2
+            ax.annotate(f"✗ {c.ratio:.2f}", ((xi + xj) / 2, mid),
+                        textcoords="offset points", xytext=(0, dy),
+                        ha="center", fontsize=8, color=_BAD, fontweight="bold",
+                        bbox=dict(boxstyle="round,pad=0.15", fc="white",
+                                  ec="none", alpha=0.85), zorder=4)
+
+    # --- the frames themselves ---
+    first_cont = next((f.key for f in frames if len(f.names) > 1), None)
+    for bnd in range(n_bounds):
+        mk = marks[bnd % len(marks)]
+        for j, f in enumerate(frames):
+            x0, x1 = span(f)
+            y = f.T(bnd)
+            if x1 > x0:                      # continuous frame: one period, so
+                ax.plot([x0, x1], [y, y], color=_INK, lw=4.0, alpha=0.30,
+                        solid_capstyle="round", zorder=2,
+                        label=("continuous frame — one period"
+                               if bnd == 0 and f.key == first_cont else None))
+            ax.plot([x0, x1] if x1 > x0 else [x0], [y] * (2 if x1 > x0 else 1),
+                    ls="none", marker=mk, ms=8, mfc="white", mec=_INK, mew=1.4,
+                    zorder=3,
+                    label=frames[0].label(bnd) if j == 0 else None)
+            # A silo belongs to a PIER, not to the frame, so mark it at the
+            # pier's own x — filling the frame's end markers would read as
+            # "both ends are siloed", which is not what the table says.
+            for b in f.members:
+                if b.silo > 0 and b.name in idx:
+                    ax.plot([idx[b.name]], [y], ls="none", marker=mk, ms=8,
+                            mfc=_INK, mec=_INK, mew=1.4, zorder=4,
+                            label=("pier with a silo"
+                                   if bnd == 0 and not ax.get_legend_handles_labels()[1]
+                                   .count("pier with a silo") else None))
+
+    ax.set_xticks(range(len(bents)))
+    ax.set_xticklabels([f"{b.name}\n+{b.silo / 12:g} ft" if b.silo > 0 else b.name
+                        for b in bents])
+    total = sum(b.silo for b in bents) / 12.0
+    ax.set_xlabel("pier (in table order)"
+                  + (f"  ·  filled = silo added, {total:g} ft total"
+                     if total else "  ·  no silos"))
+    vals = [f.T(i) for f in frames for i in range(n_bounds)]
+    if vals and min(vals) > 0 and max(vals) / min(vals) > 8.0:
+        ax.set_yscale("log")
+        ylabel += "  (log)"
+    ax.set_ylabel(ylabel)
+    ax.grid(axis="y", color=_GRID, lw=0.8, which="both")
+    ax.set_axisbelow(True)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    for side in ("left", "bottom"):
+        ax.spines[side].set_color(_GRID)
+    ax.tick_params(colors=_MUTED)
+    ax.legend(fontsize=8, frameon=False)
+    fig.tight_layout()
+    return fig
+
+
 def _ratio_fig(checks, limit, title):
     """Every adjacent-pair ratio against its limit — the 'which ones fail' chart."""
     fig, ax = plt.subplots(figsize=(5.4, max(2.2, 0.42 * len(checks) + 1.2)))
@@ -1000,8 +1095,9 @@ if "summary" in st.session_state:
 
             # --- along the bridge: each adjacent LINK drawn pass/fail ---
             k_status = _bound_status(balance, STIFFNESS_CHECK, direction)
-            t_status = _bound_status(balance, GEOMETRY_CHECK, direction,
-                                     frames=frames)
+            # geometry is keyed on FRAMES; _frame_profile_fig draws on frames,
+            # so leave the keys alone rather than collapsing to a member pier
+            t_status = _bound_status(balance, GEOMETRY_CHECK, direction)
             _silo_ft = {b.name: b.silo / 12.0 for b in balance.bents if b.silo > 0}
             _silo_txt = (
                 "  Silo depths are on the pier axis (filled marker = silo): "
@@ -1013,35 +1109,48 @@ if "summary" in st.session_state:
                 f"**Along the bridge ({direction}).** Markers are piers, one "
                 f"per fixity bound. A line between two piers is a check — plain "
                 f"grey where it complies, dashed red with `✗ ratio` where it "
-                f"does not. On the left that is the balanced-stiffness rule "
-                f"inside a continuous frame (so unlinked piers are in different "
-                f"frames, where the rule does not apply); on the right it is "
-                f"the frame-period rule between neighbouring frames."
+                f"does not."
+                f"\n\n**Left — balanced stiffness.** The rule compares BENTS "
+                f"inside one continuous frame, so markers are piers and "
+                f"unlinked piers are in different frames, where the rule does "
+                f"not apply. Only adjacent pairs are drawn; the any-two pairs "
+                f"are in the ratio chart below."
+                f"\n\n**Right — balanced frame geometry.** The rule compares "
+                f"FRAMES, so markers are frames: a continuous frame is one "
+                f"period drawn as a bar spanning its members, and links run "
+                f"frame-to-frame."
                 + _silo_txt)
             bk1, bk2 = st.columns(2)
             bk1.pyplot(_profile_fig(
                 balance.bents,
                 lambda b, i: b.kappa(direction, i, cr.mass_normalized),
                 f"κ = {cr.kappa_symbol}", k_status))
-            bk2.pyplot(_profile_fig(
-                balance.bents, lambda b, i: b.T(direction, i), "T (s)",
-                t_status))
+            bk2.pyplot(_frame_profile_fig(balance.bents, frames, t_status))
 
             # --- the ratios themselves against their limits ---
-            k_checks = [c for c in dir_checks
-                        if c.name in (STIFFNESS_CHECK, STIFFNESS_ANY_CHECK)]
+            # The two stiffness rules have DIFFERENT limits (0.75 adjacent,
+            # 0.50 any-two), so they cannot share a chart — one limit line
+            # cannot judge both, and an any-two bar at 0.60 would read as a
+            # failure against the 0.75 line while actually passing.
+            k_adj = [c for c in dir_checks if c.name == STIFFNESS_CHECK]
+            k_any = [c for c in dir_checks if c.name == STIFFNESS_ANY_CHECK]
             t_checks = [c for c in dir_checks if c.name == GEOMETRY_CHECK]
             n_bad = sum(1 for c in dir_checks if not c.passed)
             st.markdown(
                 f"**Every pair against its limit ({direction}).** Bars left of "
                 f"the limit line fail"
                 + (f" — {n_bad} of {len(dir_checks)} here." if n_bad
-                   else " — none do here."))
+                   else " — none do here.")
+                + f" Each rule is charted against **its own** limit: "
+                  f"{len(k_adj)} adjacent-bent pair(s) at {cr.k_ratio_min:.2f}, "
+                  f"{len(k_any)} any-two pair(s) at {cr.k_ratio_any:.2f}, "
+                  f"{len(t_checks)} frame-period pair(s) at "
+                  f"{cr.T_ratio_min:.2f}.")
             rb1, rb2 = st.columns(2)
-            if k_checks:
+            if k_adj:
                 rb1.pyplot(_ratio_fig(
-                    k_checks, cr.k_ratio_min,
-                    "Balanced stiffness, within a frame (SDC 7.1.2 / SGS 4.1.2)"))
+                    k_adj, cr.k_ratio_min,
+                    "Balanced stiffness — adjacent bents (SDC 7.1.2 / SGS 4.1.2)"))
             else:
                 rb1.info("No balanced-stiffness check in this direction: every "
                          "frame holds a single bent, so there is nothing to "
@@ -1050,6 +1159,13 @@ if "summary" in st.session_state:
                 rb2.pyplot(_ratio_fig(
                     t_checks, cr.T_ratio_min,
                     "Balanced frame geometry (SDC 7.1.3 / SGS 4.1.3)"))
+            if k_any:
+                # separate row: the any-two list grows as n^2 in a long frame
+                st.pyplot(_ratio_fig(
+                    k_any, cr.k_ratio_any,
+                    f"Balanced stiffness — any two bents in a frame "
+                    f"(limit {cr.k_ratio_any:.2f}, looser than the "
+                    f"{cr.k_ratio_min:.2f} adjacent rule)"))
 
         if balance.log:
             # open by default whenever the tool changed a design or failed —
@@ -1199,6 +1315,64 @@ if "summary" in st.session_state:
         sel = st.selectbox("Select column", names)
         rr = next(r for r in results if r.name == sel)
 
+        # --- what actually differs by direction, and what does not ---
+        _dirs = rr.assessment.directions
+        if len(_dirs) > 1:
+            st.markdown(
+                "**Both directions are checked and the row passes only if "
+                "both do.** Capacity here is direction-independent — the "
+                "section is axisymmetric and the p-y solves run at "
+                "`F_y = Mp/H_free` and `Vo = Mo/H_free`, none of which contain "
+                "the mass — so only the *tributary mass* differs, and with it "
+                "the period, Sa, Δd and everything downstream.")
+            rows = []
+            for dname, dres in _dirs.items():
+                g = dres.governing_bound
+                rows.append({
+                    "Direction": dname,
+                    "W entered (kip)": round(dres.weight_entered),
+                    "W + self-wt (kip)": round(dres.weight_mass),
+                    "T (s)": round(g.demand.period, 3),
+                    "Sa (g)": round(g.demand.Sa, 4),
+                    "Δd (in)": round(g.demand.disp_demand, 2),
+                    "Δc (in)": round(g.delta_c, 2),
+                    "Δc/Δd": round(g.delta_c / g.demand.disp_demand, 2),
+                    "μd": round(g.mu_demand, 2),
+                    "Status": "PASS" if dres.passed else "FAIL",
+                })
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+            # which checks the two directions actually disagree on
+            _names = sorted({c.name for c in rr.assessment.checks})
+            _diff = []
+            for n in _names:
+                per = {d: next((c for c in o.checks if c.name == n), None)
+                       for d, o in _dirs.items()}
+                vals = [c.ratio for c in per.values() if c is not None]
+                if len(vals) > 1 and abs(max(vals) - min(vals)) > 1e-9:
+                    _diff.append({"Check": n, **{
+                        f"{d} D/C": round(c.ratio, 4)
+                        for d, c in per.items() if c is not None},
+                        "Governs": max(per, key=lambda d: per[d].ratio)})
+            if _diff:
+                with st.expander(f"Checks that differ by direction "
+                                 f"({len(_diff)} of {len(_names)})"):
+                    st.dataframe(pd.DataFrame(_diff), width="stretch",
+                                 hide_index=True)
+                    st.caption(
+                        "The rest come out numerically identical because they "
+                        "are driven by Mp/Mo and geometry rather than mass. "
+                        "Column shear can also tie when α' saturates at its "
+                        "3.0 clamp, where a small μd change no longer moves it.")
+            if rr.deck_link == "integral":
+                st.info(
+                    f"**{rr.name} is integral with the deck.** Longitudinally "
+                    f"it is fixed-fixed and part of a frame, so the demand "
+                    f"above — a stand-alone fixed-free cantilever on this "
+                    f"bent's own period — is not its real longitudinal "
+                    f"demand. See *Frame displacement check* above for that. "
+                    f"Transversely this calculation stands.")
+
         c1, c2 = st.columns(2)
         with c1:
             mc = rr.assessment.mc_col
@@ -1220,14 +1394,28 @@ if "summary" in st.session_state:
             if cfg.lle_spectrum is not None:
                 lle_spec = cfg.lle_spectrum.build()
                 ax2.plot(periods, [lle_spec.Sa(t) for t in periods], "--", label="low-level")
-            for b in rr.assessment.bounds:
-                ax2.plot(b.demand.period, b.demand.Sa, "o",
-                         label=f"mult {b.multiplier:g}: T={b.demand.period:.2f}s")
+            # one figure, both directions — the shift between them is the point
+            _mk = {"longitudinal": "o", "transverse": "s"}
+            for dname, dres in (rr.assessment.directions.items()
+                                or [("", None)]):
+                for b in dres.bounds:
+                    ax2.plot(b.demand.period, b.demand.Sa,
+                             _mk.get(dname, "o"), ms=7,
+                             label=f"{dname[:5]}. mult {b.multiplier:g}: "
+                                   f"T={b.demand.period:.2f}s")
+            if not rr.assessment.directions:
+                for b in rr.assessment.bounds:
+                    ax2.plot(b.demand.period, b.demand.Sa, "o",
+                             label=f"mult {b.multiplier:g}: "
+                                   f"T={b.demand.period:.2f}s")
             ax2.set_xlabel("period T (s)")
             ax2.set_ylabel("Sa (g)")
             ax2.set_title("Spectra & effective periods")
-            ax2.legend(fontsize=8)
+            ax2.legend(fontsize=7)
             st.pyplot(fig2)
+            st.caption("Same stiffness, different tributary mass — so the "
+                       "directions sit at different periods on the same "
+                       "spectrum. Circles longitudinal, squares transverse.")
 
         # p-y pile response: deflection / shear / moment diagrams (soil fixity)
         ig = rr.assessment.inground_solution
@@ -1236,7 +1424,11 @@ if "summary" in st.session_state:
             st.markdown("**Pile response diagrams (p-y)** — distance below the "
                         "column top; ground line (top of shaft) dashed. Solid = "
                         "**shaft-design demand at column overstrength Mo**; "
-                        "dashed = yield-level stiffness bounds.")
+                        "dashed = yield-level stiffness bounds. "
+                        "**Direction-independent:** these solve at "
+                        "`F_y = Mp/H_free` and `Vo = Mo/H_free`, neither of "
+                        "which contains the tributary mass, so there is one "
+                        "set of diagrams, not one per direction.")
             cols = st.columns(3)
             for ax_col, attr, xlabel, scale in (
                     (cols[0], "y", "deflection (in)", 1.0),
