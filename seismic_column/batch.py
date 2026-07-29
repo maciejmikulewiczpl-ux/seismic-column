@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import itertools
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import pandas as pd
 
@@ -26,6 +26,7 @@ from .balance import (GEOMETRY_CHECK, STIFFNESS_ANY_CHECK, STIFFNESS_CHECK,
                       adjacent_pairs, balance_checks, bent_stiffness, dedupe,
                       dp_min_silo, frames_for, quantise_silo,
                       required_silo, silo_states, stiffness_at_silo)
+from .bent import BentAssessment, evaluate_bent
 from .frame_seismic import FrameCheck, check_all
 from .geometry import Geometry
 from .io_schema import (DIRECTIONS, LONGITUDINAL, TRANSVERSE, GlobalConfig,
@@ -48,6 +49,18 @@ class RowResult:
     silo: float = 0.0          # column silo depth actually analysed, in
     deck_link: str = "integral"   # integral | bearing | free
     weight_trans: float = 0.0     # entered TRANSVERSE tributary weight, kip
+    # A bent may carry more than one column.  ``assessment`` above stays the
+    # GOVERNING column so every existing consumer keeps working; ``bent`` holds
+    # the positions and the transverse push/pull between them.
+    bent: BentAssessment | None = None
+
+    @property
+    def n_columns(self) -> int:
+        return self.bent.n_columns if self.bent else 1
+
+    @property
+    def columns(self) -> list:
+        return list(self.bent.positions) if self.bent else []
 
 
 @dataclass
@@ -134,8 +147,14 @@ def run_row(row: pd.Series, cfg: GlobalConfig, on_candidate=None,
     rho_l_min = max(cfg.rho_l_min, provisions.rho_l_min)
     rho_l_max = min(cfg.rho_l_max, provisions.rho_l_max)
     mu_d_limit = min(cfg.mu_d_limit, provisions.mu_d_limit_single)
-    axial = float(row["axial_kip"])
+    axial = float(row["axial_kip"])          # PER COLUMN dead-load share
     weight = float(row["weight_long_kip"])   # seismic suite: unchanged basis
+    n_cols = max(1, int(row.get("n_columns", 1) or 1))
+    col_spacing = float(row.get("col_spacing_ft", 0.0) or 0.0) * 12.0
+    # SDC 2.1 4.3.2 / SGS 4.9: a multi-column bent is allowed more displacement
+    # ductility than a single-column one, having a redundant load path.
+    if n_cols > 1:
+        mu_d_limit = min(cfg.mu_d_limit, provisions.mu_d_limit_multi)
     name = str(row["name"])
 
     # soil-structure interaction (point of fixity from p-y strata)
@@ -157,7 +176,7 @@ def run_row(row: pd.Series, cfg: GlobalConfig, on_candidate=None,
         res: OptimizeResult = optimize_column(
             column, shaft, geometry, spectrum, axial, weight, spec=spec,
             weight_trans=w_trans, demand_basis=demand_basis,
-            end_fixity=end_fixity,
+            end_fixity=end_fixity, n_columns=n_cols, col_spacing=col_spacing,
             fixity_multipliers=mults, shaft_moment_basis=cfg.shaft_moment_basis,
             lle_spectrum=lle_spectrum, lle_mu_limit=cfg.lle_mu_limit,
             concrete_unit_weight=cfg.concrete_unit_weight,
@@ -169,8 +188,10 @@ def run_row(row: pd.Series, cfg: GlobalConfig, on_candidate=None,
                          True, res.log, frame=frame, silo=geometry.silo,
                          deck_link=deck_link, weight_trans=w_trans)
 
-    assessment = evaluate_column(
-        column.section(), shaft.section(), geometry, spectrum, axial, weight,
+    bent = evaluate_bent(
+        n_cols, col_spacing, axial,
+        column=column.section(), shaft=shaft.section(), geometry=geometry,
+        spectrum=spectrum, weight=weight,
         weight_trans=w_trans, demand_basis=demand_basis, end_fixity=end_fixity,
         fixity_multipliers=mults, mu_d_limit=mu_d_limit,
         rho_l_min=rho_l_min, rho_l_max=rho_l_max,
@@ -181,9 +202,11 @@ def run_row(row: pd.Series, cfg: GlobalConfig, on_candidate=None,
         self_weight_in_axial=cfg.self_weight_in_axial,
         provisions=provisions, **soil_kw,
     )
-    return RowResult(name, column, shaft, assessment, assessment.passed, False, [],
+    assessment = replace(bent.assessment, checks=bent.checks)
+    return RowResult(name, column, shaft, assessment,
+                     all(c.passed for c in bent.checks), False, list(bent.log),
                      frame=frame, silo=geometry.silo,
-                     deck_link=deck_link, weight_trans=w_trans)
+                     deck_link=deck_link, weight_trans=w_trans, bent=bent)
 
 
 def _criteria(cfg: GlobalConfig) -> BalanceCriteria:
@@ -225,7 +248,7 @@ def _build_bents(results: list[RowResult], order: dict[str, int],
                    + cfg.self_weight_mass_factor * a.W_self) / G_IN_S2
         out.append(bent_stiffness(
             rr.name, rr.frame, order[rr.name], a,
-            Hcol=a.Hcol_entered, silo=rr.silo,
+            Hcol=a.Hcol_entered, silo=rr.silo, n_columns=rr.n_columns,
             mass_long=m_long, mass_trans=m_trans, deck_link=rr.deck_link,
             D_shaft=rr.shaft.D))
     return out

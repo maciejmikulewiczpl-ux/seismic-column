@@ -22,6 +22,7 @@ from .materials import bar_area, bar_diameter
 from .moment_curvature import moment_curvature
 from .provisions import SDC_2_0, CodeProvisions
 from .section import CircularSection
+from .bent import evaluate_bent
 from .sdc_capacity import (
     UNIT_WEIGHT_DEFAULT,
     ColumnAssessment,
@@ -440,6 +441,8 @@ def optimize_column(
     weight_trans: float | None = None,
     demand_basis: dict | None = None,
     end_fixity: dict | None = None,
+    n_columns: int = 1,
+    col_spacing: float = 0.0,
     fixity_multipliers: tuple[float, ...] = (3.0, 6.0),
     shaft_moment_basis: str = "interface",
     lle_spectrum=None,
@@ -488,8 +491,14 @@ def optimize_column(
         state["iters"] += 1
         if on_candidate is not None:
             on_candidate(state["iters"])
-        return evaluate_column(
-            d.section(), shaft.section(), geom_d, spectrum, axial, weight,
+        # Size against the BENT: for a multi-column bent the checks that
+        # matter are the envelope over the column positions, since the push/pull
+        # gives them different axial and so different Mp, Vo and capacity.  With
+        # n_columns == 1 evaluate_bent is a pass-through, so nothing moves.
+        b = evaluate_bent(
+            n_columns, col_spacing, axial,
+            column=d.section(), shaft=shaft.section(), geometry=geom_d,
+            spectrum=spectrum, weight=weight,
             weight_trans=weight_trans, demand_basis=demand_basis,
             end_fixity=end_fixity,
             fixity_multipliers=fixity_multipliers,
@@ -503,6 +512,7 @@ def optimize_column(
             fixity_source=fixity_source, soil_profile=soil_profile,
             shaft_embed_length=shaft_embed_length, soil_bounds=soil_bounds,
         )
+        return replace(b.assessment, checks=b.checks)
 
     def greedy_fixed(seed: ColumnDesign, inner: tuple):
         """First feasible design at a fixed diameter, escalating the ``inner``

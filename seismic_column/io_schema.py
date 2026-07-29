@@ -31,6 +31,8 @@ COLUMNS: tuple[str, ...] = (
     "deck_link",
     "Hcol_ft",
     "silo_ft",
+    "n_columns",
+    "col_spacing_ft",
     "D_shaft_in",
     "weight_long_kip",
     "weight_trans_kip",
@@ -101,6 +103,22 @@ COLUMN_META: dict[str, tuple[str, str]] = {
               "checks. Piers sharing a frame are compared in TABLE ROW ORDER, "
               "so consecutive rows are treated as adjacent. Leave blank or "
               "enter '-' to exclude this pier from those checks."),
+    "n_columns": ("Columns in bent",
+                  "How many columns this bent carries (1 = single-column). More "
+                  "than one makes the bent a PORTAL FRAME transversely: the cap "
+                  "restrains the column heads (fixed-fixed, so each develops "
+                  "2*Mp/H) and pushing the bent overturns it, resisted by an "
+                  "axial push/pull couple between the columns. That changes the "
+                  "axial, and so Mp, Vo, Df and capacity, at each position. "
+                  "Longitudinally the columns simply act in parallel. The cap "
+                  "beam and the column-to-cap joint are NOT checked."),
+    "col_spacing_ft": ("Column spacing (ft)",
+                       "Centre-to-centre spacing, needed only when the bent has "
+                       "more than one column. This is the LEVER ARM of the "
+                       "transverse push/pull couple, so closer columns take a "
+                       "larger axial swing — close enough spacing puts the "
+                       "windward column into net tension, where the concrete "
+                       "shear term vc drops to zero."),
     "Hcol_ft": ("Column height (ft)",
                 "Clear height to the point of load / contraflexure (deck "
                 "level), measured from the top of shaft — or, if there is a "
@@ -384,6 +402,10 @@ def default_row(name: str = "C1") -> dict:
         "deck_link": "pinned",
         "Hcol_ft": 22.0,
         "silo_ft": 0.0,
+        # 1 = a single-column bent, which is what every table meant before these
+        # two columns existed.  Spacing is only read when n_columns > 1.
+        "n_columns": 1,
+        "col_spacing_ft": 0.0,
         "D_shaft_in": 84.0,
         "weight_long_kip": 800.0,
         "weight_trans_kip": 800.0,
@@ -527,6 +549,12 @@ def validate(df: pd.DataFrame, min_shaft_oversize: float = 0.0,
                          f"{list(DECK_LINKS)}")
     # A silo is optional everywhere; blank = none.
     df["silo_ft"] = pd.to_numeric(df["silo_ft"], errors="coerce").fillna(0.0)
+    # A bent is single-column unless told otherwise, which is exactly what every
+    # table before this column meant.
+    df["n_columns"] = (pd.to_numeric(df["n_columns"], errors="coerce")
+                       .fillna(1.0).round().astype("Int64"))
+    df["col_spacing_ft"] = pd.to_numeric(
+        df["col_spacing_ft"], errors="coerce").fillna(0.0)
     # Transverse weight defaults to the longitudinal one, so a table that never
     # distinguished them behaves exactly as before.
     df["weight_trans_kip"] = pd.to_numeric(
@@ -555,6 +583,19 @@ def validate(df: pd.DataFrame, min_shaft_oversize: float = 0.0,
     if df[list(NUMERIC_COLUMNS)].isna().any().any():
         bad = df[df[list(NUMERIC_COLUMNS)].isna().any(axis=1)].index.tolist()
         raise ValueError(f"Non-numeric or missing values in rows: {bad}")
+
+    if (df["n_columns"] < 1).any():
+        rows = ", ".join(str(n) for n in df.loc[df["n_columns"] < 1, "name"])
+        raise ValueError(f"n_columns must be at least 1: {rows}")
+    # Without a spacing there is no lever for the transverse push/pull couple,
+    # so a multi-column bent would silently behave as n stacked single columns.
+    _multi_no_gap = (df["n_columns"] > 1) & (df["col_spacing_ft"] <= 0)
+    if _multi_no_gap.any():
+        rows = ", ".join(str(n) for n in df.loc[_multi_no_gap, "name"])
+        raise ValueError(
+            f"col_spacing_ft must be > 0 for a multi-column bent: {rows}. The "
+            f"spacing is the lever arm of the transverse push/pull couple; "
+            f"without it the overturning axial cannot be distributed.")
 
     if (df["silo_ft"] < 0).any():
         rows = ", ".join(str(n) for n in df.loc[df["silo_ft"] < 0, "name"])

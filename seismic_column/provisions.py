@@ -60,6 +60,9 @@ class CodeProvisions:
     rho_l_min: float            # min longitudinal steel ratio
     rho_l_max: float            # max longitudinal steel ratio
     mu_d_limit_single: float    # displacement ductility demand limit, single column
+    # A multi-column bent has a redundant load path, so both codes allow more
+    # ductility than a single-column one (SDC 2.1 4.3.2 / SGS 4.9).
+    mu_d_limit_multi: float
     overstrength_factor: float  # Mo = factor * Mp (A706)
     conf_c1: float              # coeff on (Ag/Ac - 1) in rho_s,min (legacy/ACI)
     conf_c2: float              # coeff on f'c/fyh in rho_s,min (legacy/ACI)
@@ -124,6 +127,7 @@ SDC_2_1 = CodeProvisions(
     key="SDC 2.1",
     name="Caltrans SDC 2.1 (January 2025)",
     rho_l_min=0.01, rho_l_max=0.04, mu_d_limit_single=5.0,
+    mu_d_limit_multi=6.0,
     overstrength_factor=1.2,
     # ACI confinement terms removed in SDC 2.0+; ρs,min now comes from Table
     # 5.3.8.2-1 via the "caltrans_table" model, so these are unused.
@@ -173,6 +177,7 @@ AASHTO_SGS_3 = CodeProvisions(
     key="AASHTO SGS 3rd Ed.",
     name="AASHTO Guide Spec. for LRFD Seismic Bridge Design, 3rd Ed. (2011)",
     rho_l_min=0.01, rho_l_max=0.04, mu_d_limit_single=5.0,
+    mu_d_limit_multi=6.0,
     overstrength_factor=1.2, conf_c1=0.0, conf_c2=0.0,
     rho_s_min_floor=0.005, vs_max_coeff=0.25, shear_model="aashto",
     transverse_min_model="aashto_floor",   # max(ACI terms, 0.005 floor) = 0.005

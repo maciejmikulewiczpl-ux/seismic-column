@@ -32,6 +32,7 @@ from seismic_column.io_schema import (
     DECK_LINKS,
     DIRECTIONS,
     TEXT_COLUMNS,
+    TRANSVERSE,
     build_soil_profile,
     default_dataframe,
     default_soil_layers,
@@ -1364,6 +1365,47 @@ if "summary" in st.session_state:
         names = [r.name for r in results]
         sel = st.selectbox("Select column", names)
         rr = next(r for r in results if r.name == sel)
+
+        # --- a bent of more than one column: the transverse push/pull ---
+        _bent = getattr(rr, "bent", None)
+        if _bent is not None and _bent.multi:
+            st.markdown(
+                f"**{rr.name} carries {_bent.n_columns} columns at "
+                f"{_bent.spacing/12:.1f} ft centres.** Transversely this is a "
+                f"portal frame: the cap restrains the column heads (so each is "
+                f"**fixed-fixed**, developing `2·Mp/H`) and pushing the bent "
+                f"overturns it, resisted by an axial **couple** between the "
+                f"columns. The same section therefore has a different Mp, Vo, "
+                f"Df and capacity at each position. Longitudinally there is no "
+                f"couple — the columns act in parallel at the dead-load axial.")
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Push/pull ΔP", f"±{_bent.delta_P:,.0f} kip")
+            m2.metric("Σ Mo taken by the couple",
+                      f"{_bent.M_overturn/12:,.0f} kip-ft")
+            m3.metric("V_bent at overstrength", f"{_bent.V_bent:,.0f} kip")
+            st.dataframe(pd.DataFrame([{
+                "Position": p.label,
+                "x (ft)": round(p.x / 12, 1),
+                "ΔP (kip)": round(p.delta_P),
+                "P (kip)": round(p.axial),
+                "Mp (kip-ft)": round(p.assessment.mc_col.Mp / 12),
+                "Vo (kip)": round(p.assessment.directions[TRANSVERSE].Vo),
+                "Df (ft)": round(p.assessment.directions[TRANSVERSE]
+                                 .governing_bound.fixity_depth / 12, 1),
+                "Δc (in)": round(p.assessment.directions[TRANSVERSE]
+                                 .governing_bound.delta_c, 2),
+                "Δd (in)": round(p.assessment.directions[TRANSVERSE]
+                                 .governing_bound.demand.disp_demand, 2),
+                "Net tension": "YES" if p.net_tension else "",
+            } for p in _bent.positions]), width="stretch", hide_index=True)
+            for _m in _bent.log:
+                (st.warning if "TENSION" in _m or "NOT" in _m else st.caption)(_m)
+            st.caption(
+                f"Checks are the envelope over the positions (transverse) and "
+                f"the dead-load run (longitudinal); **{_bent.governing.label}** "
+                f"governs. **Not checked:** the cap beam's flexure and shear, "
+                f"and the column-to-cap joint (SDC §7.4) — a multi-column bent "
+                f"needs all three.")
 
         # --- what actually differs by direction, and what does not ---
         _dirs = rr.assessment.directions

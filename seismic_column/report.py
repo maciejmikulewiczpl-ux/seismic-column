@@ -383,6 +383,70 @@ def column_report(rr: RowResult, view: str = "envelope") -> str:
     add(f"- Shaft diameter D_shaft = {s.D:.0f} in")
     add("")
 
+    from .io_schema import TRANSVERSE as _TRANSVERSE
+
+    bent = getattr(rr, "bent", None)
+    if bent is not None and bent.multi:
+        add("## Bent — multiple columns")
+        add("")
+        add(f"**{bent.n_columns} columns at {bent.spacing/12:.1f} ft centres.** "
+            "Transversely this is a portal frame, not a row of cantilevers, and "
+            "two things follow. The cap restrains the column heads, so each "
+            "column is **fixed-fixed** and develops the two-hinge mechanism "
+            "shear `2·Mp/H`. And pushing the bent overturns it, which is "
+            "resisted by an axial **couple** between the columns — so the same "
+            "section has a different `Mp`, `Vo`, `Df`, `Δy` and `Δc` at each "
+            "position.")
+        add("")
+        add("Longitudinally there is no couple at all: the columns stand at one "
+            "station, so they act as "
+            f"{bent.n_columns} identical members in parallel at the dead-load "
+            "axial, with the end condition `deck_link` gives.")
+        add("")
+        _eq(add, "Overturning taken by the couple", "Σ Mo_i",
+            " + ".join(f"{p.assessment.Mo/12:.0f}" for p in bent.positions),
+            f"{bent.M_overturn/12:.0f} kip-ft",
+            ref="cut at the top of shaft: V_bent·H_free = Σ ΔP·x + Σ Mo, and "
+                "V_bent = Σ 2·Mo/H_free, so the couple carries Σ Mo — the "
+                "column base moments take the other half")
+        _eq(add, "Axial couple", "ΔPᵢ = M_ot · xᵢ / Σxⱼ²",
+            f"{bent.M_overturn/12:.0f} · x / Σx²",
+            f"±{bent.delta_P:.0f} kip",
+            ref="linear (plane-sections) distribution; sums to zero, so it adds "
+                "no net axial to the bent")
+        add(f"- **V_bent** = Σ Voᵢ = **{bent.V_bent:.0f} kip** at overstrength")
+        add("")
+        add("| Position | x (ft) | ΔP (kip) | P (kip) | Mp (kip-ft) | Vo (kip) "
+            "| Df (ft) | Δy (in) | Δc (in) | Δd (in) | Δc/Δd | |")
+        add("|:--|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|:--|")
+        for p in bent.positions:
+            pa = p.assessment
+            g = pa.directions[_TRANSVERSE].governing_bound
+            r = (g.delta_c / g.demand.disp_demand
+                 if g.demand.disp_demand > 0 else float("nan"))
+            add(f"| {p.label} | {p.x/12:+.1f} | {p.delta_P:+.0f} "
+                f"| {p.axial:.0f} | {pa.mc_col.Mp/12:.0f} "
+                f"| {pa.directions[_TRANSVERSE].Vo:.0f} "
+                f"| {g.fixity_depth/12:.1f} | {g.delta_y:.2f} | {g.delta_c:.2f} "
+                f"| {g.demand.disp_demand:.2f} | **{r:.2f}** "
+                f"| {'NET TENSION ⚠' if p.net_tension else ''} |")
+        add("")
+        add(f"The checks below are the **envelope** over the positions "
+            f"(transverse) and the dead-load run (longitudinal); "
+            f"**{bent.governing.label}** governs the displacement capacity. "
+            f"The push/pull "
+            f"{'converged' if bent.converged else 'did NOT converge'} in "
+            f"{bent.iterations} pass(es).")
+        add("")
+        for m in bent.log:
+            add(f"- {m}")
+        add("")
+        add("**Not checked here.** The cap beam itself — its flexure, its shear, "
+            "and the column-to-cap joint (SDC §7.4). A multi-column bent needs "
+            "all three and none of them is covered by this report; the columns "
+            "and their shafts are.")
+        add("")
+
     if len(a.directions) > 1:
         add("## Direction")
         add("")
