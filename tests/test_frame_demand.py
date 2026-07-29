@@ -114,3 +114,32 @@ def test_capacity_is_unchanged_when_no_end_condition_is_given():
     for d in (LONGITUDINAL, TRANSVERSE):
         assert (named.directions[d].bounds[0].delta_c
                 == pytest.approx(plain.directions[d].bounds[0].delta_c))
+
+
+# --- the overstrength shear follows the mechanism, not the cantilever -------
+def _named(checks, name):
+    return next(c for c in checks if c.name == name)
+
+
+def test_fixed_end_doubles_the_overstrength_member_shear():
+    """Both the COLUMN and the SHAFT carry it -- it is one force, not two."""
+    free = _assess()
+    fixed = _assess(fixity={LONGITUDINAL: "fixed"})
+    f_lon = free.directions[LONGITUDINAL]
+    x_lon = fixed.directions[LONGITUDINAL]
+    assert x_lon.Vo == pytest.approx(2.0 * f_lon.Vo)
+    # the column shear check reads the same Vo the shaft checks do
+    assert (_named(x_lon.checks, "Column shear").demand
+            == pytest.approx(x_lon.Vo))
+    # and the direction that was NOT named keeps the cantilever value
+    assert (fixed.directions[TRANSVERSE].Vo
+            == pytest.approx(free.directions[TRANSVERSE].Vo))
+
+
+def test_the_shaft_checks_are_unchanged_when_both_ends_are_free():
+    plain = _assess()
+    named = _assess(fixity={LONGITUDINAL: "free", TRANSVERSE: "free"})
+    for d in (LONGITUDINAL, TRANSVERSE):
+        for n in ("Column shear", "Shaft shear (capacity protection)"):
+            assert (_named(named.directions[d].checks, n).demand
+                    == pytest.approx(_named(plain.directions[d].checks, n).demand))

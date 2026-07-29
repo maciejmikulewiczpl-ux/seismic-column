@@ -314,6 +314,13 @@ def _shaft_demand(a, Mo_int: float, Vo_int: float, soil_bounds, warn: list):
 
     if a.soil_profile is None:                     # multiplier-based fixity
         return 0.0, 0.0, None
+    # evaluate_column already solved this per direction to build the shaft
+    # capacity-protection checks.  Reuse it rather than solving twice: two
+    # sources for the same number is how they drift apart.
+    for d in a.directions.values():
+        if (d.end_fixity == "fixed" and d.inground_solution is not None
+                and abs(d.Vo - Vo_int) < 1e-6 * max(Vo_int, 1.0)):
+            return d.inground_moment, d.inground_shear, d.inground_solution
     M, V, sol = inground_demand(
         a.H_free, a.shaft_embed_length, a.EI_col, a.EI_shaft, a.shaft_D,
         a.P_used, a.soil_profile, Vo_int, soil_bounds, M_head=Mo_int)

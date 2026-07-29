@@ -404,6 +404,12 @@ class DirectionalResult:
     governing_bound: BoundResult
     checks: list[Check]
     end_fixity: str = "free"       # head condition Df and the mechanism assume
+    # Below-ground shaft demand at THIS direction's head condition, and the
+    # overstrength member shear that produced it.
+    inground_moment: float = 0.0
+    inground_shear: float = 0.0
+    inground_solution: PileSolution | None = None
+    Vo: float = 0.0
 
     @property
     def passed(self) -> bool:
@@ -756,34 +762,56 @@ def evaluate_column(
     # Apply Vo = Mo/H_free so the column develops Mo at the top of shaft; the p-y
     # solve then gives the moment & shear the shaft must resist ALONG ITS DEPTH
     # (capacity protection). Envelope over the soil-stiffness bounds.
-    inground = None                 # governing overstrength PileSolution
-    inground_M = 0.0                # max |M| below ground at Mo, kip-in
-    inground_V = 0.0               # max |V| below ground at Mo, kip
-    if fixity_source == "soil" and soil_profile is not None:
-        Vo = Mo / geometry.H_free
-        L_embed = shaft_embed_length or soil_profile.depth
-        inground_M, inground_V, inground = inground_demand(
-            geometry.H_free, L_embed, EI_col, EI_shaft, geometry.D_shaft, P_used,
-            soil_profile, Vo, soil_bounds)
+    _ig_cache: dict[str, tuple] = {}
 
-    def _checks_for(bnds, gov):
+    def _inground_for(ef: str) -> tuple:
+        """(M, V, solution, Vo) below ground at THIS end condition.
+
+        The cantilever hands the shaft ``Vo = Mo/H_free`` with ``Mo`` at the
+        interface.  A fixed-fixed member reaches its mechanism with both hinges
+        at ``Mp_col``, so the interface moment is the SAME ``Mo`` but the shear
+        is twice as large -- and the head moment must be applied with it, or
+        the solve puts ``2*Mo`` at the interface and overstates the demand.
+        """
+        if ef in _ig_cache:
+            return _ig_cache[ef]
+        fixed = ef == "fixed"
+        Vo_ef = (2.0 if fixed else 1.0) * Mo / geometry.H_free
+        if fixity_source != "soil" or soil_profile is None:
+            out = (0.0, 0.0, None, Vo_ef)
+        else:
+            L_embed = shaft_embed_length or soil_profile.depth
+            M_ig, V_ig, sol = inground_demand(
+                geometry.H_free, L_embed, EI_col, EI_shaft, geometry.D_shaft,
+                P_used, soil_profile, Vo_ef, soil_bounds,
+                M_head=(Mo if fixed else 0.0))
+            out = (M_ig, V_ig, sol, Vo_ef)
+        _ig_cache[ef] = out
+        return out
+
+    _ef = end_fixity or {}
+    inground_M, inground_V, inground, _ = _inground_for(
+        _ef.get(LONGITUDINAL, "free"))
+
+    def _checks_for(bnds, gov, ef="free"):
+        ig_M, ig_V, _sol, ig_Vo = _inground_for(ef)
         return _build_checks(
             column, shaft, geometry, mc_col, mc_shaft, Lp, Mo, P_used,
             shaft_axial, bnds, gov, mu_d_limit, rho_l_min, rho_l_max,
             shaft_moment_basis, lle_spectrum is not None, lle_mu_limit,
-            provisions, inground_M, inground_V,
+            provisions, ig_M, ig_V, ig_Vo,
         )
 
-    _ef = (end_fixity or {})
+    _l, _t = _ef.get(LONGITUDINAL, "free"), _ef.get(TRANSVERSE, "free")
     directions = {LONGITUDINAL: DirectionalResult(
         LONGITUDINAL, weight, weight_mass, bounds, governing,
-        _checks_for(bounds, governing), _ef.get(LONGITUDINAL, "free"))}
+        _checks_for(bounds, governing, _l), _l, *_inground_for(_l))}
     if weight_trans is not None:
         w_trans_mass = weight_trans + self_weight_mass_factor * W_self
         t_bounds, t_gov = _demand_pass(w_trans_mass, TRANSVERSE)
         directions[TRANSVERSE] = DirectionalResult(
             TRANSVERSE, weight_trans, w_trans_mass, t_bounds, t_gov,
-            _checks_for(t_bounds, t_gov), _ef.get(TRANSVERSE, "free"))
+            _checks_for(t_bounds, t_gov, _t), _t, *_inground_for(_t))
     checks = _envelope_checks(directions)
     # Guard the overstrength-path gap: if every stiffness bound stayed stable but
     # the (larger) Vo in-ground solve went unstable/singular on all bounds, the
@@ -818,7 +846,7 @@ def _build_checks(
     column, shaft, geometry, mc_col, mc_shaft, Lp, Mo, axial, shaft_axial,
     bounds, governing, mu_d_limit, rho_l_min, rho_l_max, shaft_moment_basis,
     has_lle=False, lle_mu_limit=1.0, provisions=SDC_2_0,
-    inground_M=0.0, inground_V=0.0,
+    inground_M=0.0, inground_V=0.0, Vo=None,
 ) -> list[Check]:
     checks: list[Check] = []
 
@@ -871,7 +899,13 @@ def _build_checks(
     # 5. column shear (inside plastic hinge, governing mu_d)
     phiVn, Vc, Vs = shear_capacity(column, axial, mu_d, inside_hinge=True,
                                    provisions=provisions)
-    Vo = Mo / geometry.H_free
+    # Overstrength shear IN THE MEMBER -- the same force the column and the
+    # shaft below it both have to carry.  Mo/H_free is the CANTILEVER value; a
+    # fixed-fixed member reaches its mechanism with a hinge at each end and so
+    # develops twice that at the same Mp, which is why the caller supplies it
+    # per direction rather than it being assumed here.
+    if Vo is None:
+        Vo = Mo / geometry.H_free
     checks.append(Check(
         "Column shear", Vo, phiVn, phiVn >= Vo,
         f"Vo={Vo:.1f} kip, phiVn={phiVn:.1f} kip (Vc={Vc:.1f}, Vs={Vs:.1f})",
