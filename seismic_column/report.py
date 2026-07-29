@@ -759,16 +759,16 @@ def balance_report(balance) -> str:
             add(f"- {entry}")
         add("")
 
-    add("## What this section does NOT cover")
+    add("## How this relates to the seismic checks")
     add("")
-    add("- The per-bent **seismic** suite runs on the LONGITUDINAL tributary "
-        "mass and the fixed-free cantilever, unchanged by anything above — "
-        "including for an integral bent, whose fixed-fixed longitudinal "
-        "stiffness is used for the balance checks only.")
-    add("- That per-bent suite still **designs** a continuous-frame bent as a "
-        "stand-alone cantilever. The *Frame displacement check* section takes "
-        "the frame demand and the real end condition instead; where the two "
-        "disagree, the frame check is the governing one for those bents.")
+    add("- The per-bent suite now **designs** against the frame too: a bent "
+        "that shares a frame is checked on the frame's period and its real end "
+        "condition, in both directions, and the optimiser sizes it against "
+        "that. A bent in a frame of one is unaffected, because there the "
+        "frame's K and W are its own.")
+    add("- Sizing one member changes K_frame and so the demand on every member "
+        "of that frame, so the two iterate to a fixed point. The balancing log "
+        "records how many passes that took.")
     add(f"- {END_CONDITION_NOTE}")
     add("")
 

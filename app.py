@@ -1375,14 +1375,19 @@ if "summary" in st.session_state:
                         "are driven by Mp/Mo and geometry rather than mass. "
                         "Column shear can also tie when α' saturates at its "
                         "3.0 clamp, where a small μd change no longer moves it.")
-            if rr.deck_link == "integral":
+            if rr.frame and any(len(f.member_names) > 1
+                                for f in (st.session_state.get("frame_checks")
+                                          or [])
+                                if rr.name in f.member_names):
                 st.info(
-                    f"**{rr.name} is integral with the deck.** Longitudinally "
-                    f"it is fixed-fixed and part of a frame, so the demand "
-                    f"above — a stand-alone fixed-free cantilever on this "
-                    f"bent's own period — is not its real longitudinal "
-                    f"demand. See *Frame displacement check* above for that. "
-                    f"Transversely this calculation stands.")
+                    f"**{rr.name} shares a frame**, so the periods above are "
+                    f"the FRAME's, not this bent's own — the deck ties the "
+                    f"members together and they are pushed to the same "
+                    f"displacement. An integral bent is fixed-fixed "
+                    f"longitudinally too, so its capacity there comes from the "
+                    f"two-hinge mechanism rather than the cantilever. A bent "
+                    f"in a frame of one is unaffected: the frame's K and W are "
+                    f"its own.")
 
         c1, c2 = st.columns(2)
         with c1:

@@ -25,6 +25,7 @@ from .demand import (
     displacement_demand,
     magnified_demand,
 )
+from .frame_seismic import member_capacity
 from .geometry import Geometry
 from .io_schema import LONGITUDINAL, TRANSVERSE
 from .materials import bar_diameter
@@ -563,6 +564,8 @@ def evaluate_column(
     axial: float,
     weight: float,
     weight_trans: float | None = None,
+    demand_basis: dict | None = None,
+    end_fixity: dict | None = None,
     fixity_multipliers: tuple[float, ...] = (3.0, 6.0),
     mu_d_limit: float = MU_D_LIMIT_SINGLE,
     rho_l_min: float = 0.01,
@@ -655,24 +658,38 @@ def evaluate_column(
     else:
         raise ValueError("fixity_source must be 'multiplier' or 'soil'")
 
-    def _demand_pass(w_mass: float) -> tuple[list[BoundResult], BoundResult]:
+    def _demand_pass(w_mass: float,
+                     direction: str) -> tuple[list[BoundResult], BoundResult]:
         """Bounds and governing bound for one tributary mass.
 
         Everything expensive is already done and shared: ``bound_specs`` holds
         the p-y solves (run at F_y, which has no mass in it), and mc/Lp/Mo are
         fixed.  So a second direction costs only this arithmetic.
+
+        ``demand_basis`` lets a caller supply the (K, W) the demand is derived
+        from, per bound, instead of this bent's own.  That is how a bent inside
+        a continuous frame is checked against the FRAME's period: the members
+        share a displacement, so the demand is the frame's, not the bent's.
+        Supplying nothing leaves the stand-alone cantilever behaviour intact,
+        which is exactly right for a single-bent frame.
         """
+        basis = (demand_basis or {}).get(direction)
+        ef = (end_fixity or {}).get(direction, "free")
         bounds: list[BoundResult] = []
         for mult, soil_sol, soil_lbl in bound_specs:
             k = geometry.lateral_stiffness(EI_col, EI_shaft, mult)
-            demand = displacement_demand(spectrum, k, w_mass)
+            # matched on the bound LABEL the balance layer uses, so a
+            # collapsed duplicate bound cannot misalign the two
+            lbl = soil_lbl or f"{mult:.2g}·D_shaft"
+            K_dem, W_dem = ((basis or {}).get(lbl) or (k, w_mass))
+            demand = displacement_demand(spectrum, K_dem, W_dem)
 
             # displacement capacity: hinge at top of shaft (bottom of the silo,
             # if any), arm = H_free
-            delta_y = F_y * geometry.tip_flexibility(EI_col, EI_shaft, mult)
             theta_p = Lp * (mc_col.phi_u - mc_col.phi_y)
-            delta_p = theta_p * (geometry.H_free - Lp / 2.0)
-            delta_c = delta_y + delta_p
+            cap = member_capacity(geometry, EI_col, EI_shaft, mult, mc_col.Mp,
+                                  mc_shaft.Mp, Lp, theta_p, ef)
+            delta_y, delta_p, delta_c = cap.delta_y, cap.delta_p, cap.delta_c
             mu_capacity = delta_c / delta_y if delta_y > 0 else float("nan")
             # SGS 4.3.3: magnify the elastic displacement demand for short-period
             # structures (equal-displacement does not hold there).  Caltrans SDC
@@ -687,7 +704,7 @@ def evaluate_column(
             lle_demand = None
             mu_lle = None
             if lle_spectrum is not None:
-                lle_demand = displacement_demand(lle_spectrum, k, w_mass)
+                lle_demand = displacement_demand(lle_spectrum, K_dem, W_dem)
                 if provisions.short_period_magnification:
                     lle_demand = magnified_demand(lle_demand, lle_spectrum, delta_y)
                 mu_lle = lle_demand.disp_demand / delta_y if delta_y > 0 else float("nan")
@@ -705,7 +722,7 @@ def evaluate_column(
         return bounds, max(bounds,
                            key=lambda b: b.demand.disp_demand / b.delta_c)
 
-    bounds, governing = _demand_pass(weight_mass)
+    bounds, governing = _demand_pass(weight_mass, LONGITUDINAL)
 
     # --- in-ground shaft demand at column OVERSTRENGTH (soil mode) ---
     # Apply Vo = Mo/H_free so the column develops Mo at the top of shaft; the p-y
@@ -734,7 +751,7 @@ def evaluate_column(
         _checks_for(bounds, governing))}
     if weight_trans is not None:
         w_trans_mass = weight_trans + self_weight_mass_factor * W_self
-        t_bounds, t_gov = _demand_pass(w_trans_mass)
+        t_bounds, t_gov = _demand_pass(w_trans_mass, TRANSVERSE)
         directions[TRANSVERSE] = DirectionalResult(
             TRANSVERSE, weight_trans, w_trans_mass, t_bounds, t_gov,
             _checks_for(t_bounds, t_gov))

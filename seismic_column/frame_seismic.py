@@ -228,6 +228,74 @@ def _second_hinge(sections: list[Section], first: Section, V1: float,
     return best, best_V
 
 
+@dataclass
+class MemberCapacity:
+    """Sway capacity of one member at one end condition and fixity bound.
+
+    Direction enters ONLY through ``end_fixity`` — the section is axisymmetric
+    and none of this contains the tributary mass.
+    """
+
+    delta_y: float
+    delta_p: float
+    V_mech: float               # shear at which the mechanism forms, kip
+    sections: list[Section]
+    hinges: list[Section]       # in order of formation
+    warnings: list[str] = field(default_factory=list)
+
+    @property
+    def delta_c(self) -> float:
+        return self.delta_y + self.delta_p
+
+
+def member_capacity(geom: Geometry, EI_col: float, EI_shaft: float,
+                    multiplier: float, Mp_col: float, Mp_shaft: float,
+                    Lp: float, theta_p: float,
+                    end_fixity: str = "free") -> MemberCapacity:
+    """Mechanism, yield and plastic displacement for one member.
+
+    Shared by :func:`check_frame` and ``sdc_capacity.evaluate_column`` so the
+    two-hinge fixed-fixed mechanism exists in exactly one place.  With
+    ``end_fixity="free"`` this reduces to the stand-alone cantilever the
+    per-bent suite has always computed: one hinge at the top of shaft,
+    ``delta_y = (Mp/H)*C`` and ``delta_p = theta_p*(H - Lp/2)``.
+    """
+    H = geom.H_free
+    secs = _sections(geom, EI_col, EI_shaft, multiplier, Mp_col, Mp_shaft,
+                     end_fixity)
+    # The shaft is capacity-protected, so it is not a candidate for EITHER
+    # hinge -- including the first.  A shaft weak enough to win the elastic
+    # race is a shaft that needs enlarging, not a hinge the mechanism may use.
+    first = min((s for s in secs if s.name != FIXITY),
+                key=lambda s: s.V_yield)
+    flex = geom.tip_flexibility(EI_col, EI_shaft, multiplier,
+                                end_fixity=end_fixity)
+    warn: list[str] = []
+
+    if end_fixity == "free":
+        # determinate in sway, so the first hinge IS the mechanism
+        hinges, V_mech = [first], first.V_yield
+        delta_p = theta_p * (H - Lp / 2.0)
+        if first.name != TOP_OF_SHAFT:
+            warn.append(f"the moment diagram peaks at the {first.name}, not "
+                        f"the top of shaft")
+    else:
+        # indeterminate: redistribute past the first hinge to find the second
+        A_, B_, _ = geom._ei_moments(EI_col, EI_shaft, multiplier)
+        second, V_mech = _second_hinge(secs, first, first.V_yield, B_ / A_)
+        hinges = [first, second]
+        delta_p = theta_p * max(abs(second.x - first.x) - Lp, 0.0)
+        if first.name == DECK:
+            warn.append("first yield is at the DECK connection, not the top "
+                        "of shaft — so the deck joint, not only the shaft, "
+                        "has to be capacity-protected. The second hinge is "
+                        "still in the column, so the Type II premise holds")
+
+    return MemberCapacity(delta_y=V_mech * flex, delta_p=delta_p,
+                          V_mech=V_mech, sections=secs, hinges=hinges,
+                          warnings=warn)
+
+
 def _shaft_demand(a, Mo_int: float, Vo_int: float, soil_bounds, warn: list):
     """Below-ground shaft demand at the fixed-fixed mechanism's head condition.
 
@@ -291,38 +359,12 @@ def check_frame(frame, direction: str, bound: int, assessments: dict, spectrum,
         H = geom.H_free
         ef = b.end_fixity(direction)
         Mp_col, Mp_shaft = a.mc_col.Mp, a.mc_shaft.Mp
-        secs = _sections(geom, a.EI_col, a.EI_shaft, bb.multiplier,
-                         Mp_col, Mp_shaft, ef)
-        # The shaft is capacity-protected, so it is not a candidate for EITHER
-        # hinge -- including the first.  A shaft weak enough to win the elastic
-        # race is a shaft that needs enlarging, which the demand table reports;
-        # it is not a hinge the mechanism is allowed to use.
-        first = min((s for s in secs if s.name != FIXITY),
-                    key=lambda s: s.V_yield)
-        warn: list[str] = []
-
         theta_p = a.Lp * (a.mc_col.phi_u - a.mc_col.phi_y)
-        flex = geom.tip_flexibility(a.EI_col, a.EI_shaft, bb.multiplier,
-                                    end_fixity=ef)
-
-        if ef == "free":
-            # determinate in sway, so the first hinge IS the mechanism
-            hinges, V_mech = [first], first.V_yield
-            delta_p = theta_p * (H - a.Lp / 2.0)
-            if first.name != TOP_OF_SHAFT:
-                warn.append(f"the moment diagram peaks at the {first.name}, not "
-                            f"the top of shaft")
-        else:
-            # indeterminate: redistribute past the first hinge to find the second
-            A_, B_, _ = geom._ei_moments(a.EI_col, a.EI_shaft, bb.multiplier)
-            second, V_mech = _second_hinge(secs, first, first.V_yield, B_ / A_)
-            hinges = [first, second]
-            delta_p = theta_p * max(abs(second.x - first.x) - a.Lp, 0.0)
-            if first.name == DECK:
-                warn.append("first yield is at the DECK connection, not the top "
-                            "of shaft — so the deck joint, not only the shaft, "
-                            "has to be capacity-protected. The second hinge is "
-                            "still in the column, so the Type II premise holds")
+        cap = member_capacity(geom, a.EI_col, a.EI_shaft, bb.multiplier,
+                              Mp_col, Mp_shaft, a.Lp, theta_p, ef)
+        secs, hinges = cap.sections, cap.hinges
+        V_mech, delta_p = cap.V_mech, cap.delta_p
+        warn = list(cap.warnings)
 
         # The shaft is held elastic by design, so what it must be sized for is
         # the mechanism's overstrength demand at the interface.  Both hinges of
@@ -350,7 +392,7 @@ def check_frame(frame, direction: str, bound: int, assessments: dict, spectrum,
                     f"fixed-fixed mechanism is a closed-form idealisation; a "
                     f"pushover should settle it before the shaft is resized")
 
-        delta_y = V_mech * flex
+        delta_y = cap.delta_y
         d = dem
         if provisions.short_period_magnification:
             d = magnified_demand(dem, spectrum, delta_y)

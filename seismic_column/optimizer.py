@@ -438,6 +438,8 @@ def optimize_column(
     weight: float,
     spec: OptimizeSpec | None = None,
     weight_trans: float | None = None,
+    demand_basis: dict | None = None,
+    end_fixity: dict | None = None,
     fixity_multipliers: tuple[float, ...] = (3.0, 6.0),
     shaft_moment_basis: str = "interface",
     lle_spectrum=None,
@@ -488,7 +490,8 @@ def optimize_column(
             on_candidate(state["iters"])
         return evaluate_column(
             d.section(), shaft.section(), geom_d, spectrum, axial, weight,
-            weight_trans=weight_trans,
+            weight_trans=weight_trans, demand_basis=demand_basis,
+            end_fixity=end_fixity,
             fixity_multipliers=fixity_multipliers,
             rho_l_min=spec.rho_l_min, rho_l_max=spec.rho_l_max,
             shaft_moment_basis=shaft_moment_basis,

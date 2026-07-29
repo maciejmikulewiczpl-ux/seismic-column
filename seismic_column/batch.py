@@ -107,13 +107,19 @@ def _row_to_inputs(row: pd.Series, cfg: GlobalConfig, silo: float | None = None)
 
 
 def run_row(row: pd.Series, cfg: GlobalConfig, on_candidate=None,
-            silo: float | None = None) -> RowResult:
+            silo: float | None = None, demand_basis: dict | None = None,
+            end_fixity: dict | None = None) -> RowResult:
     """Run a single batch row (optimise or evaluate).
 
     ``on_candidate(iters)`` (optional) is forwarded to the optimiser for live
     within-column progress (a soil p-y optimise can take a while per column).
     ``silo`` (in) overrides the row's entered silo depth — used by the balance
     stage to re-analyse a pier at a trial depth.
+
+    ``demand_basis`` / ``end_fixity`` come from :func:`_frame_basis` and make
+    this bent be checked against its FRAME's period and end condition instead
+    of its own stand-alone cantilever.  For a single-bent frame they reduce to
+    exactly the stand-alone values, so passing them changes nothing there.
     """
     geometry, column, shaft, mults = _row_to_inputs(row, cfg, silo=silo)
     frame = str(row.get("frame", "") or "")
@@ -150,7 +156,8 @@ def run_row(row: pd.Series, cfg: GlobalConfig, on_candidate=None,
         )
         res: OptimizeResult = optimize_column(
             column, shaft, geometry, spectrum, axial, weight, spec=spec,
-            weight_trans=w_trans,
+            weight_trans=w_trans, demand_basis=demand_basis,
+            end_fixity=end_fixity,
             fixity_multipliers=mults, shaft_moment_basis=cfg.shaft_moment_basis,
             lle_spectrum=lle_spectrum, lle_mu_limit=cfg.lle_mu_limit,
             concrete_unit_weight=cfg.concrete_unit_weight,
@@ -164,7 +171,7 @@ def run_row(row: pd.Series, cfg: GlobalConfig, on_candidate=None,
 
     assessment = evaluate_column(
         column.section(), shaft.section(), geometry, spectrum, axial, weight,
-        weight_trans=w_trans,
+        weight_trans=w_trans, demand_basis=demand_basis, end_fixity=end_fixity,
         fixity_multipliers=mults, mu_d_limit=mu_d_limit,
         rho_l_min=rho_l_min, rho_l_max=rho_l_max,
         shaft_moment_basis=cfg.shaft_moment_basis,
@@ -207,7 +214,13 @@ def _build_bents(results: list[RowResult], order: dict[str, int],
         if not (in_frame(rr.frame) and rr.assessment.bounds):
             continue
         a = rr.assessment
-        m_long = a.bounds[0].demand.mass
+        # Derive BOTH masses from the entered weight, never from the demand.
+        # Reading m_long off ``bounds[0].demand.mass`` used to be equivalent,
+        # but only while the demand was self-derived: once a bent is checked
+        # against its FRAME's demand that field holds the frame's mass, which
+        # would feed back in here and compound every pass.
+        m_long = (a.weight_entered
+                  + cfg.self_weight_mass_factor * a.W_self) / G_IN_S2
         m_trans = (rr.weight_trans
                    + cfg.self_weight_mass_factor * a.W_self) / G_IN_S2
         out.append(bent_stiffness(
@@ -284,6 +297,14 @@ def run_batch_balanced(df: pd.DataFrame, cfg: GlobalConfig,
         if progress is not None:
             progress(i + 1, total, name, "PASS" if rr.feasible else "FAIL")
 
+    # Frame demand: a bent in a continuous frame does not respond on its own
+    # period.  Runs before the balance stage, which reads the resulting EI.
+    frame_log: list[str] = []
+    if results:
+        frame_log = _frame_demand_stage(results, rows_by_name, order, cfg,
+                                        on_candidate=on_candidate,
+                                        on_status=balance_progress)
+
     balance = None
     if cfg.balance_check:
         balance = _balance_stage(results, rows_by_name, order, cfg,
@@ -300,6 +321,8 @@ def run_batch_balanced(df: pd.DataFrame, cfg: GlobalConfig,
                                  get_provisions(cfg.code),
                                  soil_bounds=(cfg.soil_stiff_factor,
                                               cfg.soil_soft_factor))
+    if balance is not None and frame_log:
+        balance.log[:0] = frame_log
 
     final = {rr.name: rr for rr in results}      # post-balance designs
     summary = pd.DataFrame([
@@ -522,6 +545,121 @@ def _plan_silos_min(bents: list[BentStiffness], results: dict[str, RowResult],
     return plan.silos, plan.notes
 
 
+def _frame_basis(results: list[RowResult], order: dict[str, int],
+                 cfg: GlobalConfig) -> dict[str, tuple[dict, dict]]:
+    """Per pier, the (K, W) its demand comes from and its end condition.
+
+    A bent inside a continuous frame does not respond on its own period.  The
+    deck ties the members together, so they share a displacement and the demand
+    is the FRAME's::
+
+        K_frame = sum k_i   (each member at ITS end condition in this direction)
+        W_frame = sum w_i
+
+    Returns ``{pier: (demand_basis, end_fixity)}`` ready for :func:`run_row`.
+    A single-bent frame yields exactly that bent's own ``(k, w)``, so this is a
+    no-op for the simply supported reaches — which is what makes it safe to
+    apply everywhere rather than special-casing continuous frames.
+    """
+    bents = _build_bents(results, order, cfg)
+    out: dict[str, tuple[dict, dict]] = {}
+    for direction in DIRECTIONS:
+        for f in frames_for(bents, direction):
+            n = f.n_bounds
+            if n < 1:            # nothing solved for this frame yet
+                continue
+            # Keyed by bound LABEL, not index: bent_stiffness collapses
+            # duplicate bounds, so a positional list would misalign with the
+            # full bound set evaluate_column solves and silently leave the
+            # extra bounds on their stand-alone demand.
+            lbls = f.members[0].bound_labels
+            basis = {lbls[i]: (f.K(i), f.M() * G_IN_S2) for i in range(n)}
+            for b in f.members:
+                d_basis, d_fix = out.setdefault(b.name, ({}, {}))
+                d_basis[direction] = basis
+                d_fix[direction] = b.end_fixity(direction)
+    return out
+
+
+def _frame_demand_stage(results: list[RowResult],
+                        rows_by_name: dict[str, pd.Series],
+                        order: dict[str, int], cfg: GlobalConfig,
+                        on_candidate=None, on_status=None,
+                        max_passes: int = 6) -> list[str]:
+    """Re-run every row against its FRAME's demand, to a fixed point.
+
+    Sizing one member changes ``K_frame`` and so the demand on every member of
+    that frame, which is why this iterates rather than running once.
+
+    It converges because growth helps twice over: a bigger member raises ``k``
+    roughly with ``D^4`` through EI while raising mass only with ``D^2``, so
+    ``K_frame`` rises, ``T_frame`` falls and the demand drops for **every**
+    member — at the same time as that member's own capacity rises.
+
+    The one way it could cycle is a member SHRINKING on a later pass (the
+    optimiser starts from minimum reinforcement each call), undoing the frame
+    stiffening.  Designs are therefore held monotone: a pass may grow a column
+    but never shrink it below what an earlier pass established.
+    """
+    log: list[str] = []
+    by_name = {rr.name: rr for rr in results}
+    best_D = {rr.name: rr.design.D for rr in results}
+    prev_sig = None
+    prev_basis: dict = {}
+
+    # Only bents that SHARE a frame with someone need re-running: a single-bent
+    # frame's (K, W) is that bent's own, so the stage would reproduce the
+    # stand-alone result it already has.  On a real bridge that skips most of
+    # the deck — 13 of 18 piers here — and this stage re-runs the optimiser, so
+    # the saving is the difference between minutes and tens of minutes.
+    shared: set[str] = set()
+    for direction in DIRECTIONS:
+        for f in frames_for(_build_bents(results, order, cfg), direction):
+            if len(f.members) > 1:
+                shared.update(f.names)
+    if not shared:
+        return log
+
+    for p in range(1, max_passes + 1):
+        basis = _frame_basis(results, order, cfg)
+        if not basis:
+            return log
+        if on_status is not None:
+            on_status(f"Frame demand: pass {p} ({len(shared)} in shared frames)")
+        changed: list[str] = []
+        for i, rr in enumerate(results):
+            nb = basis.get(rr.name)
+            if nb is None or rr.name not in shared:
+                continue
+            # nothing moved for this pier since the last pass — its design
+            # already satisfies this demand, so re-running is wasted work
+            if prev_basis.get(rr.name) == nb[0]:
+                continue
+            row = rows_by_name[rr.name].copy()
+            # monotone guard: never let a later pass undercut an earlier one
+            row["Dcol_in"] = max(float(row["Dcol_in"]), best_D[rr.name])
+            new = run_row(row, cfg, on_candidate=on_candidate, silo=rr.silo,
+                          demand_basis=nb[0], end_fixity=nb[1])
+            if new.design.D != rr.design.D:
+                changed.append(f"{rr.name} {rr.design.D:.0f}→{new.design.D:.0f} in")
+            best_D[rr.name] = max(best_D[rr.name], new.design.D)
+            results[i] = new
+            by_name[rr.name] = new
+        prev_basis = {n: b[0] for n, b in basis.items()}
+        sig = tuple(sorted((r.name, r.design.D, r.design.n_bars,
+                            r.design.long_bar_no) for r in results))
+        if sig == prev_sig:
+            log.append(f"Frame demand converged after {p} pass(es).")
+            return log
+        prev_sig = sig
+        if changed:
+            log.append(f"Frame demand pass {p} resized: {', '.join(changed)}.")
+    log.append(f"Frame demand did NOT settle within {max_passes} passes — the "
+               f"designs reported are from the last pass, not a converged "
+               f"fixed point. Treat them as provisional.")
+    return log
+
+
 def _balance_stage(results: list[RowResult], rows_by_name: dict[str, pd.Series],
                    order: dict[str, int], cfg: GlobalConfig,
                    on_candidate=None, on_status=None) -> BalanceResult:
@@ -596,8 +734,14 @@ def _balance_stage(results: list[RowResult], rows_by_name: dict[str, pd.Series],
                 on_status(f"Balancing pass {outer}: re-analysing {name} with a "
                           f"{silos[name] / 12.0:.1f} ft silo…")
             try:
+                # keep the FRAME demand basis on the re-run: a silo changes
+                # H_free and so k, hence K_frame, and dropping the basis here
+                # would quietly revert this pier to its stand-alone demand
+                _nb = _frame_basis(results, order, cfg).get(name)
                 rr = run_row(rows_by_name[name], cfg, on_candidate=row_cb,
-                             silo=silos[name])
+                             silo=silos[name],
+                             demand_basis=_nb[0] if _nb else None,
+                             end_fixity=_nb[1] if _nb else None)
             except Exception as exc:
                 log.append(f"Pass {outer}: {name} failed to re-analyse at a "
                            f"{silos[name] / 12.0:.1f} ft silo ({exc}) — silo "
