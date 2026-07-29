@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import itertools
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pandas as pd
 
@@ -26,6 +26,7 @@ from .balance import (GEOMETRY_CHECK, STIFFNESS_ANY_CHECK, STIFFNESS_CHECK,
                       adjacent_pairs, balance_checks, bent_stiffness, dedupe,
                       dp_min_silo, frames_for, quantise_silo,
                       required_silo, silo_states, stiffness_at_silo)
+from .frame_seismic import FrameCheck, check_all
 from .geometry import Geometry
 from .io_schema import (DIRECTIONS, LONGITUDINAL, TRANSVERSE, GlobalConfig,
                          build_soil_profile, in_frame, validate)
@@ -56,6 +57,10 @@ class BatchOutcome:
     summary: pd.DataFrame
     results: list[RowResult]
     balance: BalanceResult | None = None   # None when the balance checks are off
+    # Frame-level displacement check for the continuous frames, at each member's
+    # REAL end condition.  Empty unless the balance checks ran (it needs the
+    # derived frames) and a continuous frame exists.
+    frame_checks: list[FrameCheck] = field(default_factory=list)
 
 
 def _bundle(row: pd.Series, key: str) -> int:
@@ -283,11 +288,21 @@ def run_batch_balanced(df: pd.DataFrame, cfg: GlobalConfig,
                                  on_candidate=on_candidate,
                                  on_status=balance_progress)
 
+    frame_checks: list[FrameCheck] = []
+    if balance is not None:
+        # Only worth reporting where the frame differs from the stand-alone
+        # cantilever the seismic suite already ran, i.e. a continuous frame.
+        frame_checks = check_all(balance,
+                                 {rr.name: rr.assessment for rr in results},
+                                 cfg.design_spectrum.build(),
+                                 get_provisions(cfg.code))
+
     final = {rr.name: rr for rr in results}      # post-balance designs
     summary = pd.DataFrame([
         s if isinstance(s, dict) else _summary_row(final[s], balance)
         for s in slots])
-    return BatchOutcome(summary=summary, results=results, balance=balance)
+    return BatchOutcome(summary=summary, results=results, balance=balance,
+                        frame_checks=frame_checks)
 
 
 def _silo_ctx(bents: list[BentStiffness], results: dict[str, RowResult],

@@ -688,11 +688,213 @@ def balance_report(balance) -> str:
     add("- The per-bent **seismic** suite runs on the LONGITUDINAL tributary "
         "mass and the fixed-free cantilever, unchanged by anything above — "
         "including for an integral bent, whose fixed-fixed longitudinal "
-        "stiffness is used for the balance checks only. The transverse demand "
-        "is not checked.")
-    add("- A bent inside a continuous frame is still designed as a stand-alone "
-        "cantilever, not from the frame's displacement demand.")
+        "stiffness is used for the balance checks only.")
+    add("- That per-bent suite still **designs** a continuous-frame bent as a "
+        "stand-alone cantilever. The *Frame displacement check* section takes "
+        "the frame demand and the real end condition instead; where the two "
+        "disagree, the frame check is the governing one for those bents.")
     add(f"- {END_CONDITION_NOTE}")
+    add("")
+
+    return "\n".join(lines)
+
+
+def frame_seismic_report(frame_checks) -> str:
+    """Markdown calc sheet for the frame-level displacement check.
+
+    ``frame_checks`` is the list of
+    :class:`~seismic_column.frame_seismic.FrameCheck` from a batch run.
+    """
+    from .frame_seismic import DECK, TOP_OF_SHAFT
+    from .io_schema import DIRECTIONS
+
+    lines: list[str] = []
+    add = lines.append
+
+    add("# Frame displacement check — real end conditions")
+    add("")
+    if not frame_checks:
+        add("*No continuous frame in this bridge.* Every bent is its own "
+            "single-bent frame, so the per-bent seismic suite already IS the "
+            "frame check — same mass, same fixed-free cantilever, same demand.")
+        return "\n".join(lines)
+
+    worst = min(fc.worst for fc in frame_checks)
+    ok = all(fc.passed for fc in frame_checks)
+    add(f"**Result:** {'PASS ✅' if ok else 'FAIL ❌'} — worst Δc/Δd = "
+        f"**{worst:.2f}**")
+    add("")
+    if not ok:
+        # a member can fail on capacity, on P-Delta, or on the Type II premise;
+        # the headline ratio does not say which, so name the reasons.
+        reasons: list[str] = []
+        bad = [m for fc in frame_checks for m in fc.members if not m.passed]
+        low = [m.name for m in bad if m.ratio < 1.0]
+        pd_ = [m.name for m in bad if not m.pdelta_ok]
+        t2 = [m.name for m in bad if not m.type_ii_ok]
+        if low:
+            reasons.append(f"**Δc < Δd** at {', '.join(low)}")
+        if pd_:
+            reasons.append(f"**P-Δ** at {', '.join(pd_)}")
+        if t2:
+            reasons.append(f"**a hinge in the shaft** at {', '.join(t2)} — the "
+                           "displacement ratio there is not the problem; the "
+                           "mechanism is")
+        add("Failing because of " + "; ".join(reasons) + ".")
+        add("")
+    add("**Why this section exists.** The per-bent suite treats every column as "
+        "a stand-alone fixed-free cantilever: its own SDOF period, one plastic "
+        "hinge at the top of shaft. For a bent that is *integral* with a "
+        "continuous deck neither half of that holds longitudinally. Here the "
+        "demand comes from the **frame** period and the capacity from the "
+        "**frame's sway mechanism**, with each member at its real end "
+        "condition.")
+    add("")
+    add("**Demand.** Rigid deck, so the members sway together and share one "
+        "displacement:")
+    add("")
+    add("```")
+    add("K_frame = Σ kᵢ   (each member at ITS end condition in this direction)")
+    add("M_frame = Σ mᵢ")
+    add("T_frame = 2π·√(M_frame / K_frame)   →   Δd from the spectrum")
+    add("```")
+    add("")
+    add("**Capacity.** With x measured down from the deck to the point of "
+        "fixity, statics gives a linear moment diagram `M(x) = V·x + M₀`:")
+    add("")
+    add("| End condition | M₀ | Consequence |")
+    add("|:--|:--|:--|")
+    add("| fixed-free | 0 | M peaks at the base; **one** hinge is a mechanism |")
+    add("| fixed-fixed | −V·B/A | contraflexure at x = B/A; **two** hinges are "
+        "needed |")
+    add("")
+    add("with `A = ∫dx/EI` and `B = ∫x·dx/EI` over the column and shaft "
+        "segments. The first hinge forms where `M/Mp` peaks — and Mp is not "
+        "constant, since the capacity-protected shaft carries far more than the "
+        "column. So the deck, the top of shaft and the point of fixity are all "
+        "candidates and the winner is read off the diagram, not assumed.")
+    add("")
+    add("A fixed-free member is determinate in sway, so the first hinge is "
+        "already a mechanism. A fixed-fixed member is indeterminate to degree "
+        "one, so it takes two — and the second has to be found by "
+        "**redistribution**, not assumed at the far end. Once the first hinge "
+        "at `x₁` is pinned at its capacity the diagram becomes")
+    add("")
+    add("```")
+    add("M(x) = V·(x − x₁) + σ·Mp₁        σ = sign of M at the first hinge")
+    add("```")
+    add("")
+    add("so each remaining section yields at `V = (±Mp − σ·Mp₁)/(x − x₁)`, and "
+        "the mechanism forms at the smallest such V not below the load that "
+        "made the first hinge. Where the first hinge lands at the deck this "
+        "reduces to the familiar work equations — `V = 2·Mp_col/H_free` for a "
+        "column mechanism, `V = (Mp_col + Mp_shaft)/L` when it runs into the "
+        "shaft — but it stays correct when it does not.")
+    add("")
+    add("The plastic displacement follows the hinge **spacing**: "
+        "`Δp = θp·(x₂ − x₁ − Lp)` for two hinges, against "
+        "`Δp = θp·(H_free − Lp/2)` for the single-hinge cantilever.")
+    add("")
+
+    for direction in DIRECTIONS:
+        sel = [fc for fc in frame_checks if fc.direction == direction]
+        if not sel:
+            continue
+        add(f"## {direction.capitalize()}")
+        add("")
+        for fc in sel:
+            add(f"### {fc.frame_key} — {' + '.join(fc.member_names)} "
+                f"— {fc.bound_label}")
+            add("")
+            add(f"End conditions: **{fc.end_conditions}**")
+            add("")
+            _eq(add, "K_frame", "Σ kᵢ",
+                " + ".join(f"{m.k:.2f}" for m in fc.members),
+                f"{fc.K:.2f} kip/in",
+                ref=f"each member at its own end condition "
+                    f"({fc.end_conditions})")
+            _eq(add, "M_frame", "Σ mᵢ",
+                " + ".join(f"{m.m:.3f}" for m in fc.members),
+                f"{fc.M:.4f} kip·s²/in  (W = {fc.W:.0f} kip)")
+            add(f"- **T_frame** = 2π·√(M/K) = 2π·√({fc.M:.4f} / {fc.K:.2f}) "
+                f"= **{fc.T:.3f} s**  ")
+            add(f"- **Sa** = {fc.Sa:.4f} g  →  **Δd = {fc.delta_d:.2f} in** "
+                "(shared by every member of the frame)")
+            add("")
+            add("| Member | End cond. | Sway mechanism | V_mech (kip) | Δy (in) "
+                "| Δp (in) | Δc (in) | Δd (in) | Δc/Δd | μd | P-Δ | Type II | "
+                "Status |")
+            add("|:--|:--|:--|--:|--:|--:|--:|--:|--:|--:|:--|:--|:--|")
+            for m in fc.members:
+                add(f"| {m.name} | "
+                    f"{'fixed-fixed' if m.end_fixity == 'fixed' else 'fixed-free'} "
+                    f"| {m.mechanism} | {m.V_mech:.0f} "
+                    f"| {m.delta_y:.2f} | {m.delta_p:.2f} | {m.delta_c:.2f} "
+                    f"| {m.delta_d:.2f} | **{m.ratio:.2f}** | {m.mu_d:.2f} "
+                    f"| {'OK' if m.pdelta_ok else 'NG'} "
+                    f"| {'OK' if m.type_ii_ok else 'NG'} "
+                    f"| {'OK ✅' if m.passed else 'NG ❌'} |")
+            add("")
+            # the moment diagram, so the hinge location is auditable
+            add("**Moment diagram — shear needed to yield each section**")
+            add("")
+            add("| Member | Section | x from deck (in) | lever \\|M\\|/V (in) | "
+                "Mp (kip-ft) | V to yield (kip) |")
+            add("|:--|:--|--:|--:|--:|--:|")
+            for m in fc.members:
+                order = {h.name: i for i, h in enumerate(m.hinges)}
+                for s in m.sections:
+                    i = order.get(s.name)
+                    mark = "" if i is None else (
+                        " ← **hinge 1**" if i == 0 else f" ← **hinge {i+1}**")
+                    vy = ("— *(no moment)*" if not math.isfinite(s.V_yield)
+                          else f"{s.V_yield:.0f}")
+                    add(f"| {m.name} | {s.name}{mark} | {s.x:.0f} | "
+                        f"{s.arm:.1f} | {s.Mp/12:.0f} | {vy} |")
+            add("")
+            if any(len(m.hinges) > 1 for m in fc.members):
+                add("*`V to yield` is the ELASTIC value. The second hinge forms "
+                    "on the redistributed diagram, so its mechanism load "
+                    "differs from the elastic figure in this table.*")
+                add("")
+            notes = [(m.name, w) for m in fc.members for w in m.warnings]
+            if notes:
+                add("**Warnings**")
+                add("")
+                for name, w in notes:
+                    add(f"- **{name}** — {w}")
+                add("")
+
+    add("## Assumptions and limits")
+    add("")
+    add("- **This is closed-form plastic analysis, not an incremental "
+        "pushover.** It gives the yielding order and the load at which a "
+        "mechanism forms, redistributing once past the first hinge — which is "
+        "enough for a member indeterminate to degree one. It does not trace "
+        "the load-displacement curve, spread of plasticity, or post-mechanism "
+        "response, and it takes Mp as fixed rather than tracking the "
+        "moment-axial interaction as the frame sways. Where the answer is "
+        "close, run the real pushover.")
+    add("- The **rigid-deck** assumption makes the members share Δd. That is "
+        "reasonable longitudinally; transversely it overstates K_frame on a "
+        "long or flexible deck.")
+    add("- **Δy is the bilinear idealisation**: the elastic flexibility "
+        "projected to V_mech. Past the first hinge the real member is softer, "
+        "so the true displacement at V_mech is larger — the standard "
+        "idealisation, and the same one the per-bent suite uses.")
+    add("- The depth to fixity `Df` is solved for a **free-head** member and "
+        "re-used with a fixed head. That is the usual simplification, not an "
+        "exact equivalence, and it matters most for the fixed-fixed case.")
+    add("- The **point of fixity is an equivalent depth**, not a real section. "
+        "A hinge reported there means the shaft is being asked to yield "
+        "somewhere below ground; it does not locate the yielding depth.")
+    add(f"- A first hinge at the **{DECK}** rather than the "
+        f"**{TOP_OF_SHAFT}** breaks the Type II premise that the hinge is held "
+        "at the top of shaft. Where that is flagged above, the deck joint needs "
+        "capacity protection and the shaft demand no longer follows from "
+        "Mo at the interface.")
+    add("- Capacity here is direction-independent per member except through the "
+        "end condition; the section is axisymmetric.")
     add("")
 
     return "\n".join(lines)

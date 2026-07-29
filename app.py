@@ -47,7 +47,8 @@ from seismic_column.io_schema import (
 )
 from seismic_column.optimizer import PARAMETERS
 from seismic_column.provisions import PROVISIONS
-from seismic_column.report import balance_report, column_report
+from seismic_column.report import (balance_report, column_report,
+                                   frame_seismic_report)
 
 st.set_page_config(page_title="Seismic Column Optimiser (SDC 2.1)", layout="wide")
 
@@ -702,6 +703,7 @@ if st.button("Run batch", type="primary"):
         st.session_state["summary"] = summary
         st.session_state["results"] = results
         st.session_state["balance"] = outcome.balance
+        st.session_state["frame_checks"] = outcome.frame_checks
         if cfg.optimize and results:
             # Fold the optimised designs back into the table so the batch is the
             # current design of record and Save persists progress.  A write-back
@@ -1060,6 +1062,120 @@ if "summary" in st.session_state:
         st.download_button("Download balance report (Markdown)",
                            balance_report(balance).encode("utf-8"),
                            "balance_report.md", "text/markdown")
+
+    # ------------------------------------------------------------------
+    frame_checks = st.session_state.get("frame_checks") or []
+    if frame_checks:
+        st.subheader("Frame displacement check — real end conditions")
+        st.markdown(
+            "The per-bent suite above designs every column as a stand-alone "
+            "**fixed-free cantilever** on its own period. For a bent that is "
+            "*integral* with a continuous deck that is wrong longitudinally on "
+            "both counts. Here the demand comes from the **frame period** and "
+            "the capacity from the **frame's sway mechanism**, with each member "
+            "at its real end condition. Where this disagrees with the per-bent "
+            "result, this is the governing check for those bents.")
+
+        worst = min(fc.worst for fc in frame_checks)
+        all_ok = all(fc.passed for fc in frame_checks)
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Frame check", "PASS" if all_ok else "FAIL")
+        m2.metric("Worst Δc/Δd", f"{worst:.2f}")
+        m3.metric("Frames checked", f"{len(frame_checks)}")
+
+        if not all_ok:
+            # a member can fail on capacity, on P-Δ, or on the Type II premise;
+            # the headline ratio does not say which, so name the reasons.
+            bad = [m for fc in frame_checks for m in fc.members if not m.passed]
+            reasons = []
+            if [m.name for m in bad if m.ratio < 1.0]:
+                reasons.append("**Δc < Δd** at "
+                               + ", ".join(m.name for m in bad if m.ratio < 1.0))
+            if [m.name for m in bad if not m.pdelta_ok]:
+                reasons.append("**P-Δ** at "
+                               + ", ".join(m.name for m in bad
+                                           if not m.pdelta_ok))
+            if [m.name for m in bad if not m.type_ii_ok]:
+                reasons.append(
+                    "**a plastic hinge in the shaft** at "
+                    + ", ".join(m.name for m in bad if not m.type_ii_ok)
+                    + " — the displacement ratio there is not the problem, the "
+                      "mechanism is")
+            st.error("Failing because of " + "; ".join(reasons) + ".")
+
+        for fc in frame_checks:
+            head = (f"{fc.direction.capitalize()} · {fc.frame_key} "
+                    f"({' + '.join(fc.member_names)}) · {fc.end_conditions} · "
+                    f"T = {fc.T:.3f} s · Δd = {fc.delta_d:.2f} in · "
+                    f"{'PASS' if fc.passed else 'FAIL'}")
+            with st.expander(head, expanded=not fc.passed):
+                st.markdown("\n".join([
+                    f"- `K_frame = Σkᵢ = "
+                    f"{' + '.join(f'{m.k:.1f}' for m in fc.members)} "
+                    f"= {fc.K:.1f} kip/in`  — each member at its own end "
+                    f"condition ({fc.end_conditions})",
+                    f"- `M_frame = Σmᵢ = "
+                    f"{' + '.join(f'{m.m:.3f}' for m in fc.members)} "
+                    f"= {fc.M:.4f} kip·s²/in`  (W = {fc.W:.0f} kip)",
+                    f"- `T_frame = 2π·√(M/K) = 2π·√({fc.M:.4f}/{fc.K:.1f}) "
+                    f"= {fc.T:.3f} s`  →  `Sa = {fc.Sa:.4f} g`  →  "
+                    f"`Δd = {fc.delta_d:.2f} in`, shared by every member",
+                ]))
+                st.dataframe(pd.DataFrame([{
+                    "Member": m.name,
+                    "End cond.": ("fixed-fixed" if m.end_fixity == "fixed"
+                                  else "fixed-free"),
+                    "Sway mechanism": m.mechanism,
+                    "V_mech (kip)": round(m.V_mech),
+                    "Δy (in)": round(m.delta_y, 2),
+                    "Δp (in)": round(m.delta_p, 2),
+                    "Δc (in)": round(m.delta_c, 2),
+                    "Δd (in)": round(m.delta_d, 2),
+                    "Δc/Δd": round(m.ratio, 2),
+                    "μd": round(m.mu_d, 2),
+                    "P-Δ": "OK" if m.pdelta_ok else "NG",
+                    "Type II": "OK" if m.type_ii_ok else "NG",
+                    "Status": "PASS" if m.passed else "FAIL",
+                } for m in fc.members]), width="stretch", hide_index=True)
+
+                st.caption(
+                    "Moment diagram — the shear that brings each candidate "
+                    "section to its Mp, elastically. Hinges are marked in "
+                    "order of formation."
+                    + (" The second forms on the redistributed diagram, so "
+                       "its mechanism load differs from the elastic figure "
+                       "here." if any(len(m.hinges) > 1 for m in fc.members)
+                       else ""))
+                md_rows = []
+                for m in fc.members:
+                    order = {h.name: i for i, h in enumerate(m.hinges)}
+                    for sec in m.sections:
+                        i = order.get(sec.name)
+                        md_rows.append({
+                            "Member": m.name, "Section": sec.name,
+                            "x from deck (in)": round(sec.x),
+                            "lever |M|/V (in)": round(sec.arm, 1),
+                            "Mp (kip-ft)": round(sec.Mp / 12),
+                            "V to yield (kip)": (
+                                None if not math.isfinite(sec.V_yield)
+                                else round(sec.V_yield)),
+                            "Hinge": "" if i is None else f"{i + 1}",
+                        })
+                st.dataframe(pd.DataFrame(md_rows), width="stretch",
+                             hide_index=True)
+
+                for m in fc.members:
+                    for w in m.warnings:
+                        st.warning(f"**{m.name}** — {w}")
+
+        st.caption("Closed-form plastic analysis, not an incremental pushover: "
+                   "it gives the first yielding section and the load at which a "
+                   "mechanism forms, not the hinging sequence or "
+                   "post-mechanism response. Rigid deck. Δy is the bilinear "
+                   "idealisation. See the report for the full assumption list.")
+        st.download_button("Download frame check (Markdown)",
+                           frame_seismic_report(frame_checks).encode("utf-8"),
+                           "frame_check.md", "text/markdown")
 
     if results:
         st.subheader("Drill-down")
