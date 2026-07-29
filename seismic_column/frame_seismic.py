@@ -43,10 +43,19 @@ displacement follows the hinge SPACING::
     two hinges   Dp = theta_p * (x2 - x1 - Lp)
     cantilever   Dp = theta_p * (H_free - Lp/2)
 
-A hinge that lands in the shaft rather than the column is reported as a
-**failure**, not as capacity: Type II detailing exists precisely to keep the
-hinge in the column above, so a mechanism that relies on the shaft yielding
-violates the premise the whole design rests on.
+Both hinges are sought **in the column**.  The shaft is a capacity-protected
+element: it is not a section competing to hinge, it is one the designer keeps
+elastic by sizing it for the column's overstrength demand.  Letting it compete
+would answer a shaft-SIZING question in the wrong place, and — because Dp
+follows the hinge spacing — would also credit the member with the long
+deck-to-fixity lever it does not have.
+
+What the mechanism yields instead is that design demand, and for a fixed-fixed
+member it is not the fixed-free one.  Both hinges of a column mechanism sit at
+``Mp_col``, so the interface MOMENT is the same ``Mo``; but the mechanism shear
+is ``2*Mp/H`` against ``Mp/H``, i.e. **twice** the overstrength shear the
+stand-alone cantilever was sized for.  That is reported per member so the p-y
+in-ground demand can be re-run at the right head condition.
 
 **What this is not.**  It is closed-form plastic analysis, not an incremental
 pushover.  It gives the section that yields first and the load at which a
@@ -94,7 +103,10 @@ class MemberCheck:
     delta_d: float
     mu_d: float
     pdelta_ok: bool
-    type_ii_ok: bool = True  # every hinge stays in the column
+    # Capacity-design demand the SHAFT must then be sized for, at the mechanism.
+    Mo_interface: float = 0.0   # overstrength moment at the top of shaft, kip-in
+    Vo_interface: float = 0.0   # overstrength shear there, kip
+    Vo_cantilever: float = 0.0  # what the fixed-free suite designed it for, kip
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -106,13 +118,19 @@ class MemberCheck:
         return " + ".join(h.name for h in self.hinges)
 
     @property
+    def shear_amplification(self) -> float:
+        """Vo here against the fixed-free Vo the shaft was designed for."""
+        return (self.Vo_interface / self.Vo_cantilever
+                if self.Vo_cantilever > 0 else float("nan"))
+
+    @property
     def ratio(self) -> float:
         return self.delta_c / self.delta_d if self.delta_d > 0 else float("nan")
 
     @property
     def passed(self) -> bool:
         return (self.ratio >= 1.0 and math.isfinite(self.mu_d)
-                and self.pdelta_ok and self.type_ii_ok)
+                and self.pdelta_ok)
 
 
 @dataclass
@@ -163,16 +181,28 @@ def _sections(geom: Geometry, EI_col: float, EI_shaft: float, multiplier: float,
 
 def _second_hinge(sections: list[Section], first: Section, V1: float,
                   contraflexure: float) -> tuple[Section, float]:
-    """Redistribute past the first hinge and find the second.
+    """Redistribute past the first hinge and find the second, IN THE COLUMN.
 
     With the first hinge pinned at its capacity the diagram becomes
     ``M(x) = V*(x - x1) + sigma*Mp1``, so each remaining section yields at
     ``V = (±Mp - sigma*Mp1) / (x - x1)``.  The mechanism forms at the smallest
     such V that is not below the load which formed the first hinge.
+
+    The shaft is **excluded as a candidate**.  It is a capacity-protected
+    element: it is not a section that competes to hinge, it is one the designer
+    is required to keep elastic by sizing it for the column's overstrength
+    demand.  Asking whether the as-entered ``Mp_shaft`` would yield first
+    answers a shaft-SIZING question, and answering it here would both fail the
+    displacement check for the wrong reason and — because the plastic
+    displacement follows the hinge spacing — credit the member with the long
+    deck-to-fixity lever it does not have.  The demand the shaft must then be
+    designed for is reported separately by :func:`shaft_demand`.
     """
     sigma = 1.0 if first.x >= contraflexure else -1.0
     best, best_V = None, float("inf")
     for s in sections:
+        if s.name == FIXITY:               # capacity-protected, cannot hinge
+            continue
         dx = s.x - first.x
         if abs(dx) < 1e-9:
             continue
@@ -209,12 +239,16 @@ def check_frame(frame, direction: str, bound: int, assessments: dict, spectrum,
         bb = a.bounds[bound]
         geom = Geometry(Hcol=a.Hcol_entered, D_shaft=a.shaft_D, silo=a.silo)
         H = geom.H_free
-        L = H + bb.fixity_depth
         ef = b.end_fixity(direction)
         Mp_col, Mp_shaft = a.mc_col.Mp, a.mc_shaft.Mp
         secs = _sections(geom, a.EI_col, a.EI_shaft, bb.multiplier,
                          Mp_col, Mp_shaft, ef)
-        first = min(secs, key=lambda s: s.V_yield)
+        # The shaft is capacity-protected, so it is not a candidate for EITHER
+        # hinge -- including the first.  A shaft weak enough to win the elastic
+        # race is a shaft that needs enlarging, which the demand table reports;
+        # it is not a hinge the mechanism is allowed to use.
+        first = min((s for s in secs if s.name != FIXITY),
+                    key=lambda s: s.V_yield)
         warn: list[str] = []
 
         theta_p = a.Lp * (a.mc_col.phi_u - a.mc_col.phi_y)
@@ -236,14 +270,24 @@ def check_frame(frame, direction: str, bound: int, assessments: dict, spectrum,
             delta_p = theta_p * max(abs(second.x - first.x) - a.Lp, 0.0)
             if first.name == DECK:
                 warn.append("first yield is at the DECK connection, not the top "
-                            "of shaft — the joint needs capacity protection, and "
-                            "the shaft demand no longer follows from Mo at the "
-                            "interface")
+                            "of shaft — so the deck joint, not only the shaft, "
+                            "has to be capacity-protected. The second hinge is "
+                            "still in the column, so the Type II premise holds")
 
-        if any(h.name == FIXITY for h in hinges):
-            warn.append("the sway mechanism relies on a plastic hinge IN THE "
-                        "SHAFT, which Type II detailing is meant to prevent — "
-                        "reported as a failure, not as capacity")
+        # The shaft is held elastic by design, so what it must be sized for is
+        # the mechanism's overstrength demand at the interface.  Both hinges of
+        # a column mechanism sit at Mp_col, so the interface MOMENT is the same
+        # Mo the fixed-free suite already used — but the SHEAR is not.
+        lam = provisions.overstrength_factor
+        Mo_int, Vo_int = lam * Mp_col, lam * V_mech
+        Vo_cant = lam * Mp_col / H
+        if ef != "free" and Vo_int > Vo_cant * 1.01:
+            warn.append(
+                f"the shaft must be capacity-designed for this mechanism: same "
+                f"Mo = {Mo_int/12:.0f} kip-ft at the interface, but "
+                f"Vo = {Vo_int:.0f} kip — {Vo_int/Vo_cant:.2f}× the "
+                f"{Vo_cant:.0f} kip the fixed-free suite sized it for. Re-run "
+                f"the p-y in-ground demand at that head condition")
 
         delta_y = V_mech * flex
         d = dem
@@ -260,7 +304,7 @@ def check_frame(frame, direction: str, bound: int, assessments: dict, spectrum,
             mu_d=delta_d / delta_y if delta_y > 0 else float("nan"),
             pdelta_ok=(a.P_used * delta_d
                        <= provisions.pdelta_factor * a.mc_col.Mp),
-            type_ii_ok=all(h.name != FIXITY for h in hinges),
+            Mo_interface=Mo_int, Vo_interface=Vo_int, Vo_cantilever=Vo_cant,
             warnings=warn))
     return fc
 

@@ -1084,8 +1084,8 @@ if "summary" in st.session_state:
         m3.metric("Frames checked", f"{len(frame_checks)}")
 
         if not all_ok:
-            # a member can fail on capacity, on P-Δ, or on the Type II premise;
-            # the headline ratio does not say which, so name the reasons.
+            # a member can fail on capacity or on P-Δ; the headline ratio does
+            # not say which, so name the reasons.
             bad = [m for fc in frame_checks for m in fc.members if not m.passed]
             reasons = []
             if [m.name for m in bad if m.ratio < 1.0]:
@@ -1095,12 +1095,6 @@ if "summary" in st.session_state:
                 reasons.append("**P-Δ** at "
                                + ", ".join(m.name for m in bad
                                            if not m.pdelta_ok))
-            if [m.name for m in bad if not m.type_ii_ok]:
-                reasons.append(
-                    "**a plastic hinge in the shaft** at "
-                    + ", ".join(m.name for m in bad if not m.type_ii_ok)
-                    + " — the displacement ratio there is not the problem, the "
-                      "mechanism is")
             st.error("Failing because of " + "; ".join(reasons) + ".")
 
         for fc in frame_checks:
@@ -1134,9 +1128,31 @@ if "summary" in st.session_state:
                     "Δc/Δd": round(m.ratio, 2),
                     "μd": round(m.mu_d, 2),
                     "P-Δ": "OK" if m.pdelta_ok else "NG",
-                    "Type II": "OK" if m.type_ii_ok else "NG",
                     "Status": "PASS" if m.passed else "FAIL",
                 } for m in fc.members]), width="stretch", hide_index=True)
+
+                if any(m.end_fixity == "fixed" for m in fc.members):
+                    st.markdown(
+                        "**Shaft capacity-design demand at this mechanism.** "
+                        "The shaft is held elastic by design, so it does not "
+                        "compete to hinge — it must be sized for the column's "
+                        "overstrength demand. Both hinges of a column "
+                        "mechanism sit at Mp_col, so the interface *moment* is "
+                        "the same Mo the fixed-free suite used. The *shear* is "
+                        "not.")
+                    st.dataframe(pd.DataFrame([{
+                        "Member": m.name,
+                        "Mo at interface (kip-ft)": round(m.Mo_interface / 12),
+                        "Vo at interface (kip)": round(m.Vo_interface),
+                        "Vo, fixed-free basis (kip)": round(m.Vo_cantilever),
+                        "Amplification": f"{m.shear_amplification:.2f}×",
+                    } for m in fc.members]), width="stretch", hide_index=True)
+                    st.caption(
+                        "Re-run the p-y in-ground demand at that head "
+                        "condition and size the shaft for the resulting M/V "
+                        "envelope. This app does not do that — the in-ground "
+                        "figures in the per-column drill-down are on the "
+                        "fixed-free basis.")
 
                 st.caption(
                     "Moment diagram — the shear that brings each candidate "

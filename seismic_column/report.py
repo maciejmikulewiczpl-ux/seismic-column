@@ -725,21 +725,16 @@ def frame_seismic_report(frame_checks) -> str:
         f"**{worst:.2f}**")
     add("")
     if not ok:
-        # a member can fail on capacity, on P-Delta, or on the Type II premise;
-        # the headline ratio does not say which, so name the reasons.
+        # a member can fail on capacity or on P-Delta; the headline ratio does
+        # not say which, so name the reasons.
         reasons: list[str] = []
         bad = [m for fc in frame_checks for m in fc.members if not m.passed]
         low = [m.name for m in bad if m.ratio < 1.0]
         pd_ = [m.name for m in bad if not m.pdelta_ok]
-        t2 = [m.name for m in bad if not m.type_ii_ok]
         if low:
             reasons.append(f"**Δc < Δd** at {', '.join(low)}")
         if pd_:
             reasons.append(f"**P-Δ** at {', '.join(pd_)}")
-        if t2:
-            reasons.append(f"**a hinge in the shaft** at {', '.join(t2)} — the "
-                           "displacement ratio there is not the problem; the "
-                           "mechanism is")
         add("Failing because of " + "; ".join(reasons) + ".")
         add("")
     add("**Why this section exists.** The per-bent suite treats every column as "
@@ -822,9 +817,8 @@ def frame_seismic_report(frame_checks) -> str:
                 "(shared by every member of the frame)")
             add("")
             add("| Member | End cond. | Sway mechanism | V_mech (kip) | Δy (in) "
-                "| Δp (in) | Δc (in) | Δd (in) | Δc/Δd | μd | P-Δ | Type II | "
-                "Status |")
-            add("|:--|:--|:--|--:|--:|--:|--:|--:|--:|--:|:--|:--|:--|")
+                "| Δp (in) | Δc (in) | Δd (in) | Δc/Δd | μd | P-Δ | Status |")
+            add("|:--|:--|:--|--:|--:|--:|--:|--:|--:|--:|:--|:--|")
             for m in fc.members:
                 add(f"| {m.name} | "
                     f"{'fixed-fixed' if m.end_fixity == 'fixed' else 'fixed-free'} "
@@ -832,9 +826,32 @@ def frame_seismic_report(frame_checks) -> str:
                     f"| {m.delta_y:.2f} | {m.delta_p:.2f} | {m.delta_c:.2f} "
                     f"| {m.delta_d:.2f} | **{m.ratio:.2f}** | {m.mu_d:.2f} "
                     f"| {'OK' if m.pdelta_ok else 'NG'} "
-                    f"| {'OK' if m.type_ii_ok else 'NG'} "
                     f"| {'OK ✅' if m.passed else 'NG ❌'} |")
             add("")
+            # what the capacity-protected shaft must then be sized for
+            if any(m.end_fixity == "fixed" for m in fc.members):
+                add("**Shaft capacity-design demand at this mechanism**")
+                add("")
+                add("The shaft is held elastic by design, so it does not "
+                    "compete to hinge — it has to be sized for the column's "
+                    "overstrength demand. Both hinges of a column mechanism "
+                    "sit at Mp_col, so the interface **moment** is the same Mo "
+                    "the fixed-free suite already used. The **shear** is not.")
+                add("")
+                add("| Member | Mo at interface (kip-ft) | Vo at interface "
+                    "(kip) | Vo, fixed-free basis (kip) | Amplification |")
+                add("|:--|--:|--:|--:|--:|")
+                for m in fc.members:
+                    add(f"| {m.name} | {m.Mo_interface/12:.0f} "
+                        f"| {m.Vo_interface:.0f} | {m.Vo_cantilever:.0f} "
+                        f"| **{m.shear_amplification:.2f}×** |")
+                add("")
+                add("Re-run the p-y in-ground demand at that head condition and "
+                    "size the shaft for the resulting M/V envelope. **This "
+                    "report does not do that** — the in-ground figures "
+                    "elsewhere in the calc sheet are on the fixed-free basis.")
+                add("")
+
             # the moment diagram, so the hinge location is auditable
             add("**Moment diagram — shear needed to yield each section**")
             add("")
@@ -889,10 +906,16 @@ def frame_seismic_report(frame_checks) -> str:
         "A hinge reported there means the shaft is being asked to yield "
         "somewhere below ground; it does not locate the yielding depth.")
     add(f"- A first hinge at the **{DECK}** rather than the "
-        f"**{TOP_OF_SHAFT}** breaks the Type II premise that the hinge is held "
-        "at the top of shaft. Where that is flagged above, the deck joint needs "
-        "capacity protection and the shaft demand no longer follows from "
-        "Mo at the interface.")
+        f"**{TOP_OF_SHAFT}** means the deck joint, not just the shaft, needs "
+        "capacity protection. It does not on its own break the Type II premise: "
+        "the second hinge is still in the column, at the top of shaft.")
+    add("- **The shaft is assumed capacity-protected**, so it is excluded as a "
+        "hinge candidate rather than checked against its as-entered Mp. That is "
+        "a design obligation, not an assumption that comes free — the shaft "
+        "demand table above is the demand it must be sized for, and it is NOT "
+        "verified here. If the shaft cannot be made strong enough within a "
+        "buildable diameter, that is a real failure, but a shaft capacity-design "
+        "failure rather than a displacement one.")
     add("- Capacity here is direction-independent per member except through the "
         "end condition; the section is axisymmetric.")
     add("")

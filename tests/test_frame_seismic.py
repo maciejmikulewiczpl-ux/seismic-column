@@ -75,15 +75,20 @@ def test_second_hinge_reproduces_the_work_equation_when_the_deck_yields_first():
     assert V == pytest.approx(2.0 * Mp_col / H)
 
 
-def test_second_hinge_goes_to_the_shaft_when_the_column_is_short():
-    """A short column reaches the shaft mechanism first: V = (Mpc+Mps)/L."""
+def test_the_shaft_is_excluded_even_when_it_would_win():
+    """A weak shaft would take the second hinge — but it is capacity-protected.
+
+    Without the exclusion this fixture gives FIXITY at V = (Mpc+Mps)/L = 314,
+    below the column mechanism's 333.  The solver must skip it anyway.
+    """
     Mp_col, Mp_shaft, H, L, c = 1.0e5, 1.2e5, 600.0, 700.0, 400.0
     secs = _diagram(Mp_col, Mp_shaft, H, L, c)
     first = min(secs, key=lambda s: s.V_yield)
     assert first.name == DECK
+    assert (Mp_col + Mp_shaft) / L < 2.0 * Mp_col / H     # the shaft would win
     second, V = _second_hinge(secs, first, first.V_yield, contraflexure=c)
-    assert second.name == FIXITY
-    assert V == pytest.approx((Mp_col + Mp_shaft) / L)
+    assert second.name == TOP_OF_SHAFT
+    assert V == pytest.approx(2.0 * Mp_col / H)
 
 
 def test_second_hinge_never_precedes_the_first():
@@ -116,6 +121,7 @@ class _Assessment:
 class _Provisions:
     short_period_magnification = False
     pdelta_factor = 0.25
+    overstrength_factor = 1.2
 
 
 class _Spectrum:
@@ -209,25 +215,44 @@ def test_every_member_of_a_frame_shares_the_displacement_demand():
     assert fc.members[0].delta_d == pytest.approx(fc.delta_d)
 
 
-def test_a_hinge_in_the_shaft_is_reported_as_a_failure():
-    """A weak shaft: the mechanism runs through it, so Type II is violated."""
-    fc = _run(LONGITUDINAL, ["integral"], Mp_col=2.0e5, Mp_shaft=5.0e5)
-    m = fc.members[0]
-    assert m.hinges[0].name == DECK           # still yields at the deck first
-    assert m.hinges[-1].name == FIXITY        # but the mechanism needs the shaft
-    assert not m.type_ii_ok
-    assert not m.passed                       # even though Δc/Δd may be fine
-    assert any("SHAFT" in w for w in m.warnings)
-    assert not fc.passed
+def test_the_shaft_never_hinges_however_weak_it_is():
+    """It is capacity-protected: a sizing question, not a hinge candidate.
+
+    A shaft weak enough that it would win the elastic race must still be
+    excluded, or Δp picks up the long deck-to-fixity lever it does not have.
+    """
+    weak = _run(LONGITUDINAL, ["integral"], Mp_col=2.0e5, Mp_shaft=2.1e5)
+    strong = _run(LONGITUDINAL, ["integral"], Mp_col=2.0e5, Mp_shaft=9.0e5)
+    for fc in (weak, strong):
+        m = fc.members[0]
+        assert [h.name for h in m.hinges] == [DECK, TOP_OF_SHAFT]
+    # and the shaft strength therefore cannot move the displacement capacity
+    assert weak.members[0].delta_c == pytest.approx(strong.members[0].delta_c)
+    assert weak.passed and strong.passed
 
 
 def test_deck_first_yield_is_warned_but_not_a_failure_by_itself():
-    """A strong shaft keeps both hinges in the column — Type II intact."""
     fc = _run(LONGITUDINAL, ["integral"])
     m = fc.members[0]
     assert [h.name for h in m.hinges] == [DECK, TOP_OF_SHAFT]
-    assert m.type_ii_ok
+    assert m.passed
     assert any("DECK" in w for w in m.warnings)
+
+
+def test_fixed_fixed_doubles_the_overstrength_shear_on_the_shaft():
+    """Same Mo at the interface, 2x the Vo — the number the shaft needs."""
+    m = _run(LONGITUDINAL, ["integral"]).members[0]
+    assert m.Mo_interface == pytest.approx(1.2 * 2.0e5)
+    assert m.Vo_interface == pytest.approx(1.2 * 2.0 * 2.0e5 / 300.0)
+    assert m.Vo_cantilever == pytest.approx(1.2 * 2.0e5 / 300.0)
+    assert m.shear_amplification == pytest.approx(2.0)
+    assert any("capacity-designed" in w for w in m.warnings)
+
+
+def test_fixed_free_member_gets_no_shear_amplification_warning():
+    m = _run(TRANSVERSE, ["integral"]).members[0]
+    assert m.shear_amplification == pytest.approx(1.0)
+    assert not any("capacity-designed" in w for w in m.warnings)
 
 
 def test_ratio_and_ductility_are_consistent():
