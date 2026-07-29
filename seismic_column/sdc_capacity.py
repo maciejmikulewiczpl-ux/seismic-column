@@ -403,6 +403,7 @@ class DirectionalResult:
     bounds: list[BoundResult]
     governing_bound: BoundResult
     checks: list[Check]
+    end_fixity: str = "free"       # head condition Df and the mechanism assume
 
     @property
     def passed(self) -> bool:
@@ -469,17 +470,18 @@ _PILE_CACHE: dict[tuple, PileSolution] = {}
 
 
 def _cached_pile_solve(Hcol, L_embed, EI_col, EI_shaft, D_shaft, axial,
-                       soil: SoilProfile, V_head,
-                       M_head: float = 0.0) -> PileSolution:
+                       soil: SoilProfile, V_head, M_head: float = 0.0,
+                       head_fixed: bool = False) -> PileSolution:
     # M_head MUST be in the key: a fixed-fixed solve shares every other argument
     # with the cantilever one and would otherwise collide with it in the cache.
     key = (round(Hcol, 3), round(L_embed, 3), round(EI_col, 0), round(EI_shaft, 0),
            round(D_shaft, 3), round(axial, 3), round(V_head, 3),
-           round(M_head, 3), soil.signature())
+           round(M_head, 3), head_fixed, soil.signature())
     sol = _PILE_CACHE.get(key)
     if sol is None:
         sol = solve_lateral(Hcol, L_embed, EI_col, EI_shaft, D_shaft, axial,
-                            soil, V_head, M_head=M_head)
+                            soil, V_head, M_head=M_head,
+                            head_fixed=head_fixed)
         if len(_PILE_CACHE) > 4000:
             _PILE_CACHE.clear()
         _PILE_CACHE[key] = sol
@@ -640,23 +642,49 @@ def evaluate_column(
     F_y = mc_col.Mp / geometry.H_free      # yield head force (soil solve level)
 
     # --- build the fixity bounds: from manual multipliers, or soil-derived ---
-    if fixity_source == "soil":
-        if soil_profile is None:
-            raise ValueError("fixity_source='soil' requires a soil_profile")
-        L_embed = shaft_embed_length or soil_profile.depth
-        _lbl = {2.0: "upper (stiff soil)", 0.5: "lower (soft soil)", 1.0: "best"}
-        bound_specs = []
-        for factor in soil_bounds:
-            prof = replace(soil_profile,
-                           stiffness_factor=soil_profile.stiffness_factor * factor)
-            sol = _cached_pile_solve(geometry.H_free, L_embed, EI_col, EI_shaft,
-                                     geometry.D_shaft, P_used, prof, F_y)
-            mult = sol.Df_eq / geometry.D_shaft
-            bound_specs.append((mult, sol, _lbl.get(factor, f"×{factor:g}")))
-    elif fixity_source == "multiplier":
-        bound_specs = [(m, None, "") for m in fixity_multipliers]
-    else:
+    if fixity_source not in ("soil", "multiplier"):
         raise ValueError("fixity_source must be 'multiplier' or 'soil'")
+    if fixity_source == "soil" and soil_profile is None:
+        raise ValueError("fixity_source='soil' requires a soil_profile")
+    _lbl = {2.0: "upper (stiff soil)", 0.5: "lower (soft soil)", 1.0: "best"}
+    _spec_cache: dict[str, list] = {}
+
+    def _specs_for(ef: str) -> list:
+        """Fixity bounds for one END CONDITION.
+
+        The depth to fixity is not a property of the ground alone — it depends
+        on how hard the member pushes the soil and on whether its head can
+        rotate.  A fixed-fixed member develops the two-hinge mechanism shear
+        ``2*Mp/H`` (twice the cantilever's) AND restrains the head, so both the
+        p-y load level and the equivalence itself differ.  Solving it free-head
+        at ``Mp/H`` and re-using that Df is the simplification this replaces.
+
+        Cached per end condition: 15 of 18 bents on a typical bridge are
+        fixed-free both ways and pay for one set of solves, not two.
+        """
+        if ef in _spec_cache:
+            return _spec_cache[ef]
+        if fixity_source == "multiplier":
+            out = [(m, None, "") for m in fixity_multipliers]
+        else:
+            fixed = ef == "fixed"
+            # both hinges of a column mechanism sit at Mp_col over the same
+            # lever, so the mechanism shear is 2*Mp/H -- no Df in it, which is
+            # what keeps this from being circular
+            V = (2.0 if fixed else 1.0) * F_y
+            L_embed = shaft_embed_length or soil_profile.depth
+            out = []
+            for factor in soil_bounds:
+                prof = replace(
+                    soil_profile,
+                    stiffness_factor=soil_profile.stiffness_factor * factor)
+                sol = _cached_pile_solve(geometry.H_free, L_embed, EI_col,
+                                         EI_shaft, geometry.D_shaft, P_used,
+                                         prof, V, head_fixed=fixed)
+                out.append((sol.Df_eq / geometry.D_shaft, sol,
+                            _lbl.get(factor, f"×{factor:g}")))
+        _spec_cache[ef] = out
+        return out
 
     def _demand_pass(w_mass: float,
                      direction: str) -> tuple[list[BoundResult], BoundResult]:
@@ -676,7 +704,7 @@ def evaluate_column(
         basis = (demand_basis or {}).get(direction)
         ef = (end_fixity or {}).get(direction, "free")
         bounds: list[BoundResult] = []
-        for mult, soil_sol, soil_lbl in bound_specs:
+        for mult, soil_sol, soil_lbl in _specs_for(ef):
             k = geometry.lateral_stiffness(EI_col, EI_shaft, mult)
             # matched on the bound LABEL the balance layer uses, so a
             # collapsed duplicate bound cannot misalign the two
@@ -746,15 +774,16 @@ def evaluate_column(
             provisions, inground_M, inground_V,
         )
 
+    _ef = (end_fixity or {})
     directions = {LONGITUDINAL: DirectionalResult(
         LONGITUDINAL, weight, weight_mass, bounds, governing,
-        _checks_for(bounds, governing))}
+        _checks_for(bounds, governing), _ef.get(LONGITUDINAL, "free"))}
     if weight_trans is not None:
         w_trans_mass = weight_trans + self_weight_mass_factor * W_self
         t_bounds, t_gov = _demand_pass(w_trans_mass, TRANSVERSE)
         directions[TRANSVERSE] = DirectionalResult(
             TRANSVERSE, weight_trans, w_trans_mass, t_bounds, t_gov,
-            _checks_for(t_bounds, t_gov))
+            _checks_for(t_bounds, t_gov), _ef.get(TRANSVERSE, "free"))
     checks = _envelope_checks(directions)
     # Guard the overstrength-path gap: if every stiffness bound stayed stable but
     # the (larger) Vo in-ground solve went unstable/singular on all bounds, the

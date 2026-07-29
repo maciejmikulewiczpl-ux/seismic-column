@@ -312,8 +312,21 @@ def bent_stiffness(name: str, frame: str, order: int, assessment,
     No new mechanics: ``k`` is the effective (cracked, ``EI = Mp/phi_y``) lateral
     stiffness of the two-segment equivalent cantilever that already drives the
     displacement demand.  Periods are derived per direction from the two masses.
+
+    The two stiffnesses come from DIFFERENT bound sets, because the depth to
+    fixity is not the same under the two head conditions: ``k`` (fixed-free,
+    used transversely and by every non-integral bent) reads the transverse
+    bounds, while ``k_fixed`` reads the longitudinal ones, where an integral
+    bent's Df was solved with the head restrained at the mechanism shear.
+    Taking both off one bound set would apply a fixed-head Df to the free-head
+    stiffness, which is the error this whole distinction exists to avoid.
     """
-    bounds = assessment.bounds
+    dirs = getattr(assessment, "directions", {}) or {}
+    free_bounds = (dirs[TRANSVERSE].bounds if TRANSVERSE in dirs
+                   else assessment.bounds)
+    fixed_bounds = (dirs[LONGITUDINAL].bounds if LONGITUDINAL in dirs
+                    else assessment.bounds)
+    bounds = free_bounds
     labels = [b.soil_label or f"{b.multiplier:.2g}·D_shaft" for b in bounds]
     # Collapse duplicate bounds.  Setting both soil brackets to the same factor
     # (or both fixity multipliers to the same value) makes evaluate_column run
@@ -333,7 +346,8 @@ def bent_stiffness(name: str, frame: str, order: int, assessment,
         geom = Geometry(Hcol=Hcol, D_shaft=D_shaft, silo=silo)
         k_fixed = tuple(
             geom.lateral_stiffness(assessment.EI_col, assessment.EI_shaft,
-                                   bounds[i].multiplier, end_fixity="fixed")
+                                   fixed_bounds[min(i, len(fixed_bounds) - 1)]
+                                   .multiplier, end_fixity="fixed")
             for i in keep)
     return BentStiffness(
         name=name, frame=frame, order=order, Hcol=Hcol, silo=silo,

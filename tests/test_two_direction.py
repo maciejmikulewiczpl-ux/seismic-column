@@ -143,3 +143,79 @@ def test_head_moment_sign_puts_Mp_at_the_interface():
     m_wrong = abs(wrong.moment[wrong.ground_index])
     assert m_right == pytest.approx(Mp, rel=0.10)
     assert m_wrong > 2.0 * Mp                  # the 3x error the guard catches
+
+
+# --- depth to fixity depends on the head condition --------------------------
+def _soil():
+    from seismic_column.soil import SoilLayer, SoilProfile
+    return SoilProfile((SoilLayer(thickness=900.0, py_model="elastic_subgrade",
+                                  gamma_eff=0.0, k_py=0.5),))
+
+
+def test_head_fixed_defaults_off_so_the_free_head_solve_is_untouched():
+    import numpy as np
+
+    from seismic_column.pile_solver import solve_lateral
+    args = (300.0, 600.0, 2.0e9, 6.0e9, 84.0, 500.0, _soil())
+    a = solve_lateral(*args, 400.0)
+    b = solve_lateral(*args, 400.0, head_fixed=False)
+    assert np.array_equal(a.y, b.y)
+    assert a.Df_eq == pytest.approx(b.Df_eq)
+
+
+def test_restraining_the_head_stiffens_it_and_creates_a_reaction_moment():
+    from seismic_column.pile_solver import solve_lateral
+    args = (300.0, 600.0, 2.0e9, 6.0e9, 84.0, 500.0, _soil())
+    free = solve_lateral(*args, 400.0)
+    fixed = solve_lateral(*args, 400.0, head_fixed=True)
+    assert fixed.head_flexibility < free.head_flexibility
+    # a free head carries no moment (only element-recovery noise); a restrained
+    # one carries a real reaction, orders of magnitude larger
+    assert abs(fixed.moment[0]) > 1000.0 * abs(free.moment[0])
+
+
+@pytest.mark.parametrize("end_fixity", ["free", "fixed"])
+def test_the_derived_Df_reproduces_the_flexibility_it_was_derived_from(end_fixity):
+    """The equivalence must be self-consistent against its OWN head condition."""
+    from seismic_column.geometry import Geometry
+    from seismic_column.pile_solver import solve_lateral
+    H, D, EIc, EIs = 300.0, 84.0, 2.0e9, 6.0e9
+    sol = solve_lateral(H, 600.0, EIc, EIs, D, 500.0, _soil(), 400.0,
+                        head_fixed=(end_fixity == "fixed"))
+    back = Geometry(Hcol=H, D_shaft=D).tip_flexibility(
+        EIc, EIs, sol.Df_eq / D, end_fixity=end_fixity)
+    assert back == pytest.approx(sol.head_flexibility, rel=1e-4)
+
+
+def test_the_free_head_formula_on_a_fixed_head_flexibility_is_wrong():
+    """Guard the mistake the end_fixity argument exists to prevent.
+
+    Running the cantilever equivalence on a fixed-head flexibility returns a Df
+    far too SHALLOW — the applied restraint cancels much of the head rotation,
+    so the member looks stiff to a formula that assumes a free head.
+    """
+    from seismic_column.pile_solver import (equivalent_fixity_depth,
+                                            solve_lateral)
+    H, D, EIc, EIs = 300.0, 84.0, 2.0e9, 6.0e9
+    fixed = solve_lateral(H, 600.0, EIc, EIs, D, 500.0, _soil(), 400.0,
+                          head_fixed=True)
+    wrong = equivalent_fixity_depth(fixed.head_flexibility, H, EIc, EIs, "free")
+    assert wrong < 0.6 * fixed.Df_eq
+
+
+def test_the_fixed_equivalence_is_monotone_in_Df():
+    """A deeper fixity is always more flexible — what makes the bisection safe."""
+    from seismic_column.pile_solver import equivalent_fixity_depth
+    H, EIc, EIs = 300.0, 2.0e9, 6.0e9
+    floor = H ** 3 / (12.0 * EIc)          # Df = 0, the prismatic fixed-fixed
+    prev = -1.0
+    for f in (1.5 * floor, 2 * floor, 4 * floor, 10 * floor, 30 * floor):
+        Df = equivalent_fixity_depth(f, H, EIc, EIs, "fixed")
+        assert Df > prev
+        prev = Df
+
+
+def test_an_unknown_end_fixity_is_rejected():
+    from seismic_column.pile_solver import equivalent_fixity_depth
+    with pytest.raises(ValueError):
+        equivalent_fixity_depth(1e-6, 300.0, 2.0e9, 6.0e9, "pinned")

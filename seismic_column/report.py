@@ -395,18 +395,42 @@ def column_report(rr: RowResult, view: str = "envelope") -> str:
             "Only the tributary mass differs, and with it T, Sa, Δd, μd, P-Δ "
             "and any shear capacity that degrades with μd.")
         add("")
-        add("| Direction | W entered (kip) | W + self-wt | T (s) | Sa (g) "
-            "| Δd (in) | Δc (in) | Δc/Δd | μd | |")
-        add("|:--|--:|--:|--:|--:|--:|--:|--:|--:|:--|")
+        add("| Direction | End cond. | W entered (kip) | W + self-wt | Df (ft) "
+            "| Df/D | Le (ft) | T (s) | Sa (g) | Δd (in) | Δc (in) | Δc/Δd "
+            "| μd | |")
+        add("|:--|:--|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|:--|")
         for dname, dres in a.directions.items():
             g = dres.governing_bound
-            add(f"| {dname} | {dres.weight_entered:.0f} "
-                f"| {dres.weight_mass:.0f} | {g.demand.period:.3f} "
+            ef = ("fixed-fixed" if dres.end_fixity == "fixed" else "fixed-free")
+            add(f"| {dname} | {ef} | {dres.weight_entered:.0f} "
+                f"| {dres.weight_mass:.0f} | {g.fixity_depth/12:.1f} "
+                f"| {g.fixity_depth/a.shaft_D:.2f} | {g.Le/12:.1f} "
+                f"| {g.demand.period:.3f} "
                 f"| {g.demand.Sa:.4f} | {g.demand.disp_demand:.2f} "
                 f"| {g.delta_c:.2f} "
                 f"| {g.delta_c / g.demand.disp_demand:.2f} "
                 f"| {g.mu_demand:.2f} "
                 f"| {'PASS ✅' if dres.passed else 'FAIL ❌'} |")
+        add("")
+        _dfs = {d: o.governing_bound.fixity_depth for d, o in a.directions.items()}
+        if len(set(round(v, 3) for v in _dfs.values())) > 1:
+            add("**The depth to fixity differs by direction here**, which it "
+                "does whenever the end condition does. Df is not a property of "
+                "the ground alone: a fixed-fixed member develops the two-hinge "
+                "mechanism shear `2·Mp/H` — twice the cantilever's — so the "
+                "soil is driven further along its p-y curve and the fixity "
+                "migrates deeper; and the equivalence itself changes, because "
+                "the depth is the one reproducing the member's **fixed-fixed** "
+                "flexibility `C − B²/A` rather than the cantilever's `C`. "
+                "**Use the value for the direction you are modelling** — these "
+                "are the equivalent fixed-base cantilever lengths for a "
+                "pushover.")
+        else:
+            add("Df is the same in both directions here, which is correct when "
+                "the end condition is: this bent is a fixed-free cantilever "
+                "either way, and the p-y solve that sets Df runs at "
+                "`F_y = Mp/H_free`, which contains no mass and no directional "
+                "term.")
         add("")
         names = sorted({c.name for c in a.checks})
         diff = []

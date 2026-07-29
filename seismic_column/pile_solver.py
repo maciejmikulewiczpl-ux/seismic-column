@@ -82,6 +82,7 @@ def solve_lateral(
     V_head: float,
     *,
     M_head: float = 0.0,
+    head_fixed: bool = False,
     target_h: float | None = None,
     max_nodes: int = 241,
     max_iter: int = 100,
@@ -141,6 +142,13 @@ def solve_lateral(
     F[1] = M_head                                     # ... and moment there (DOF 1
     #                                                   is the head rotation; 0 =
     #                                                   free head, as it always was)
+    # A FIXED head restrains the rotation instead of loading it, so the head
+    # moment becomes a reaction rather than an input.  Penalty on the DOF-1
+    # diagonal, scaled off the assembled matrix so it dominates at any EI.
+    head_penalty = (1.0e10 * float(np.max(np.abs(ab0[_BW]))) if head_fixed
+                    else 0.0)
+    if head_fixed:
+        F[1] = 0.0
     spring_dofs = [2 * i for i in range(n_node) if embedded[i]]
     spring_depth = [depth[i] for i in range(n_node) if embedded[i]]
     spring_trib = [trib[i] for i in range(n_node) if embedded[i]]
@@ -154,6 +162,7 @@ def solve_lateral(
     it = 0
     for it in range(1, max_iter + 1):
         ab = ab0.copy()
+        ab[_BW, 1] += head_penalty                    # 0.0 unless head_fixed
         for dof, zc, tb in zip(spring_dofs, spring_depth, spring_trib):
             Es = soil.secant_modulus(zc, v[dof // 2], D_shaft)      # kip/in^2
             ab[_BW, dof] += Es * tb                                  # lateral spring
@@ -228,7 +237,9 @@ def solve_lateral(
     stable = bool(converged and same_sign and bounded)
     if stable and V_head != 0.0:
         f_soil = y_top / V_head
-        Df_eq = equivalent_fixity_depth(f_soil, Hcol, EI_col, EI_shaft)
+        Df_eq = equivalent_fixity_depth(
+            f_soil, Hcol, EI_col, EI_shaft,
+            end_fixity="fixed" if head_fixed else "free")
         head_stiff = V_head / y_top
     else:                                            # failed / unstable
         f_soil = float("inf")
@@ -246,20 +257,70 @@ def solve_lateral(
     )
 
 
+def _abc(Df: float, Hcol: float, EI_col: float, EI_shaft: float):
+    """The three EI moments of the two-segment member, as in ``Geometry``."""
+    L = Hcol + Df
+    A = Hcol / EI_col + Df / EI_shaft
+    B = Hcol ** 2 / (2.0 * EI_col) + (L ** 2 - Hcol ** 2) / (2.0 * EI_shaft)
+    C = Hcol ** 3 / (3.0 * EI_col) + (L ** 3 - Hcol ** 3) / (3.0 * EI_shaft)
+    return A, B, C
+
+
 def equivalent_fixity_depth(f_soil: float, Hcol: float, EI_col: float,
-                            EI_shaft: float) -> float:
+                            EI_shaft: float, end_fixity: str = "free") -> float:
     """Depth to fixity Df below top of shaft matching the head flexibility.
 
-    Inverts the two-segment cantilever flexibility
-    ``f = Hcol³/(3·EI_col) + ((Hcol+Df)³ − Hcol³)/(3·EI_shaft)`` for ``Df`` so
-    the existing :class:`~seismic_column.geometry.Geometry` machinery reproduces
-    the soil-derived head displacement. Returns 0 if the soil is so stiff that
-    the column flexure alone already exceeds ``f_soil``.
+    The equivalence is only meaningful against the SAME head condition the
+    flexibility was measured at, which is why ``end_fixity`` is not optional
+    in spirit even though it defaults to the historical free-head case:
+
+    * ``"free"`` inverts the cantilever flexibility
+      ``f = C = Hcol³/(3·EI_col) + ((Hcol+Df)³ − Hcol³)/(3·EI_shaft)``, a cubic
+      in ``Hcol+Df`` and so closed-form;
+    * ``"fixed"`` inverts ``f = C − B²/A``, which is not, so it is bracketed
+      and bisected.  It is monotone increasing in ``Df`` — a deeper fixity is
+      always more flexible — which makes the bisection safe.
+
+    Running the free-head formula on a fixed-head flexibility is the mistake
+    this parameter exists to prevent: it returns a Df far too SHALLOW (the
+    applied head moment cancels much of the shear-induced head rotation, so the
+    member looks stiff to a formula expecting a free head), which would read as
+    a stiffer bent rather than the modelling mismatch it is.
+
+    Returns 0 if the soil is so stiff that the column flexure alone already
+    exceeds ``f_soil``.
     """
-    f_col = Hcol ** 3 / (3.0 * EI_col)
-    if not np.isfinite(f_soil) or f_soil <= f_col:
+    if not np.isfinite(f_soil):
         return 0.0
-    # solve (Hcol+Df)^3 = Hcol^3 + 3*EI_shaft*(f_soil - f_col)
-    le_cubed = Hcol ** 3 + 3.0 * EI_shaft * (f_soil - f_col)
-    Le = le_cubed ** (1.0 / 3.0)
-    return max(Le - Hcol, 0.0)
+    if end_fixity == "free":
+        f_col = Hcol ** 3 / (3.0 * EI_col)
+        if f_soil <= f_col:
+            return 0.0
+        # solve (Hcol+Df)^3 = Hcol^3 + 3*EI_shaft*(f_soil - f_col)
+        Le = (Hcol ** 3 + 3.0 * EI_shaft * (f_soil - f_col)) ** (1.0 / 3.0)
+        return max(Le - Hcol, 0.0)
+    if end_fixity != "fixed":
+        raise ValueError("end_fixity must be 'free' or 'fixed'")
+
+    def flex(Df: float) -> float:
+        A, B, C = _abc(Df, Hcol, EI_col, EI_shaft)
+        return C - B * B / A
+
+    if f_soil <= flex(0.0):                    # soil stiffer than the column alone
+        return 0.0
+    lo, hi = 0.0, max(Hcol, 1.0)
+    for _ in range(60):                        # grow the bracket, then bisect
+        if flex(hi) >= f_soil:
+            break
+        lo, hi = hi, hi * 2.0
+    else:
+        return hi
+    for _ in range(100):
+        mid = 0.5 * (lo + hi)
+        if flex(mid) < f_soil:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo < 1e-6 * max(hi, 1.0):
+            break
+    return 0.5 * (lo + hi)

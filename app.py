@@ -1281,6 +1281,45 @@ if "summary" in st.session_state:
                         "reported, not failed: this is closed-form plastic "
                         "analysis, not a pushover.")
 
+                # the p-y diagrams for THIS mechanism, against the cantilever
+                _sh = [m for m in fc.members if m.shaft_solution is not None]
+                if _sh:
+                    st.markdown(
+                        "**Pile response at this mechanism** — solid = the "
+                        "fixed-fixed head condition (`V = Vo`, `M = Mo`), "
+                        "dashed = the fixed-free cantilever the per-bent suite "
+                        "solves. Same interface moment, twice the shear, so "
+                        "the below-ground diagrams are genuinely different.")
+                    for m in _sh:
+                        _rr = next((r for r in results if r.name == m.name),
+                                   None)
+                        _cant = (_rr.assessment.inground_solution
+                                 if _rr is not None else None)
+                        pcols = st.columns(3)
+                        for pc, attr, xlab, sc in (
+                                (pcols[0], "y", "deflection (in)", 1.0),
+                                (pcols[1], "shear", "shear (kip)", 1.0),
+                                (pcols[2], "moment", "moment (kip-ft)",
+                                 1.0 / 12.0)):
+                            figm, axm = plt.subplots()
+                            if _cant is not None:
+                                axm.plot(getattr(_cant, attr) * sc, _cant.x,
+                                         "--", lw=1.0, color=_MUTED,
+                                         label="fixed-free (Vo = Mo/H)")
+                            s_ = m.shaft_solution
+                            axm.plot(getattr(s_, attr) * sc, s_.x, "-", lw=1.6,
+                                     color=_INK,
+                                     label="fixed-fixed (Vo = 2Mo/H, M = Mo)")
+                            axm.axhline(s_.x[s_.ground_index], ls="--",
+                                        color="0.5", lw=1)
+                            axm.axvline(0, color="0.7", lw=0.6)
+                            axm.invert_yaxis()
+                            axm.set_xlabel(xlab)
+                            axm.set_ylabel("dist. from column top (in)")
+                            axm.set_title(f"{m.name}", fontsize=9)
+                            axm.legend(fontsize=6)
+                            pc.pyplot(figm)
+
                 st.caption(
                     "Moment diagram — the shear that brings each candidate "
                     "section to its Mp, elastically. Hinges are marked in "
@@ -1440,11 +1479,21 @@ if "summary" in st.session_state:
             st.markdown("**Pile response diagrams (p-y)** — distance below the "
                         "column top; ground line (top of shaft) dashed. Solid = "
                         "**shaft-design demand at column overstrength Mo**; "
-                        "dashed = yield-level stiffness bounds. "
-                        "**Direction-independent:** these solve at "
-                        "`F_y = Mp/H_free` and `Vo = Mo/H_free`, neither of "
-                        "which contains the tributary mass, so there is one "
-                        "set of diagrams, not one per direction.")
+                        "dashed = yield-level stiffness bounds. These are the "
+                        "**fixed-free cantilever** solves — `F_y = Mp/H_free` "
+                        "and `Vo = Mo/H_free`. Neither contains the tributary "
+                        "mass, so for a bent that is fixed-free both ways "
+                        "there is genuinely one set of diagrams, not one per "
+                        "direction."
+                        + ("  \n\n**This bent is fixed-fixed longitudinally**, "
+                           "where it develops twice this shear and its head "
+                           "carries moment — so the longitudinal diagrams are "
+                           "NOT these. They are plotted in *Frame displacement "
+                           "check* above, and its longitudinal depth to fixity "
+                           "differs too (see the Direction table below)."
+                           if any(d.end_fixity == "fixed"
+                                  for d in rr.assessment.directions.values())
+                           else ""))
             cols = st.columns(3)
             for ax_col, attr, xlabel, scale in (
                     (cols[0], "y", "deflection (in)", 1.0),
