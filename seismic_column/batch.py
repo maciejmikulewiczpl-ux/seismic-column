@@ -297,7 +297,9 @@ def run_batch_balanced(df: pd.DataFrame, cfg: GlobalConfig,
         frame_checks = check_all(balance,
                                  {rr.name: rr.assessment for rr in results},
                                  cfg.design_spectrum.build(),
-                                 get_provisions(cfg.code))
+                                 get_provisions(cfg.code),
+                                 soil_bounds=(cfg.soil_stiff_factor,
+                                              cfg.soil_soft_factor))
 
     final = {rr.name: rr for rr in results}      # post-balance designs
     summary = pd.DataFrame([

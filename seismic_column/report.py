@@ -219,6 +219,8 @@ def _add_fixity_source(add, a) -> None:
     ig = a.inground_solution
     if ig is not None and a.inground_moment > 0:
         gamma = a.provisions.shaft_demand_factor
+        # in-ground demand is solved at Mo, so it is direction-independent —
+        # read it off the envelope rather than the selected view
         m_chk = _find(a.checks, "Shaft flexure in-ground (p-y)")
         v_chk = _find(a.checks, "Shaft shear in-ground (p-y)")
         phiVn = v_chk.capacity if v_chk else 0.0
@@ -324,11 +326,26 @@ def _add_concrete_shear(add, sec, d, b, mu_d, P) -> None:
         f"= {b.vc*1000.0:.0f} psi = {b.vc:.4f} ksi", "SDC 5.3.7.2-3")
 
 
-def column_report(rr: RowResult) -> str:
-    """Return a Markdown calculation report for a single column result."""
+def _checks_for_view(a, view: str):
+    """The check list for ``view``; falls back to the envelope if unavailable."""
+    if view != "envelope" and view in a.directions:
+        return a.directions[view].checks
+    return a.checks
+
+
+def column_report(rr: RowResult, view: str = "envelope") -> str:
+    """Markdown calculation report for one column result.
+
+    ``view`` selects which check list the whole document is written against:
+    ``"envelope"`` (the worse of both directions — what the row actually passes
+    or fails on), or a single direction by name.  Only the CHECKS differ; the
+    section, moment-curvature, p-y and shaft-protection numbers are
+    direction-independent and identical in every view.
+    """
     a = rr.assessment
     d = rr.design
     s = rr.shaft
+    checks = _checks_for_view(a, view)
     lines: list[str] = []
     add = lines.append
 
@@ -337,6 +354,12 @@ def column_report(rr: RowResult) -> str:
     add(f"**Result:** {'PASS ✅' if rr.feasible else 'FAIL ❌'}  "
         f"({'optimised' if rr.optimized else 'as-entered'})")
     add(f"**Design code:** {a.provisions.name}")
+    if len(a.directions) > 1:
+        add(f"**Checks shown:** {view}"
+            + ("  — the worse of both directions, which is what this row "
+               "passes or fails on" if view == "envelope"
+               else f"  — the {view} direction ALONE. The row's verdict is the "
+                    f"envelope of both; this view is for inspection."))
     add("")
 
     add("## Geometry")
@@ -474,19 +497,20 @@ def column_report(rr: RowResult) -> str:
             "low-level earthquake.*")
         add("")
 
-    add("## SDC checks")
+    add("## SDC checks"
+        + (f" — {view}" if len(a.directions) > 1 else ""))
     add("")
     add("| Check | Demand | Capacity | D/C | Status |")
     add("|:--|--:|--:|--:|:--:|")
-    for c in a.checks:
+    for c in checks:
         add(f"| {c.name} | {c.demand:.1f} | {c.capacity:.1f} | {c.ratio:.2f} | "
             f"{'PASS' if c.passed else 'FAIL'} |")
     add("")
-    for c in a.checks:
+    for c in checks:
         add(f"- *{c.name}*: {c.note}")
     add("")
 
-    lines.extend(_detailed_calcs(rr))
+    lines.extend(_detailed_calcs(rr, checks))
 
     if rr.log:
         add("## Optimiser log")
@@ -891,17 +915,33 @@ def frame_seismic_report(frame_checks) -> str:
                     "the fixed-free suite already used. The **shear** is not.")
                 add("")
                 add("| Member | Mo at interface (kip-ft) | Vo at interface "
-                    "(kip) | Vo, fixed-free basis (kip) | Amplification |")
-                add("|:--|--:|--:|--:|--:|")
+                    "(kip) | Vo, fixed-free basis | Amplification "
+                    "| M below ground (kip-ft) | Mp shaft | D/C | |")
+                add("|:--|--:|--:|--:|--:|--:|--:|--:|:--|")
                 for m in fc.members:
+                    ig = ("—" if m.shaft_solution is None
+                          else f"{m.shaft_moment/12:.0f}")
+                    dc = ("—" if m.shaft_solution is None
+                          else f"**{m.shaft_dc:.2f}**")
+                    verdict = ("" if m.shaft_solution is None else
+                               ("YIELDS ❌" if m.shaft_dc > 1.0 else "OK ✅"))
                     add(f"| {m.name} | {m.Mo_interface/12:.0f} "
                         f"| {m.Vo_interface:.0f} | {m.Vo_cantilever:.0f} "
-                        f"| **{m.shear_amplification:.2f}×** |")
+                        f"| **{m.shear_amplification:.2f}×** | {ig} "
+                        f"| {m.shaft_Mp/12:.0f} | {dc} | {verdict} |")
                 add("")
-                add("Re-run the p-y in-ground demand at that head condition and "
-                    "size the shaft for the resulting M/V envelope. **This "
-                    "report does not do that** — the in-ground figures "
-                    "elsewhere in the calc sheet are on the fixed-free basis.")
+                add("The below-ground columns are a **p-y solve at this "
+                    "mechanism's head condition** — `V = Vo` with `M = Mo` "
+                    "applied at the head, so the interface lands on Mo rather "
+                    "than the 2·Mo that applying the shear alone would give. "
+                    "The head-moment sign is verified against the interface "
+                    "moment on every solve, because the wrong sign lands 3·Mo "
+                    "there and would look plausible in this table.")
+                add("")
+                add("**A D/C above 1.00 is reported, not failed.** The "
+                    "fixed-fixed mechanism is closed-form plastic analysis, not "
+                    "a pushover; it should be confirmed against a real model "
+                    "before the shaft is resized on the strength of it.")
                 add("")
 
             # the moment diagram, so the hinge location is auditable
@@ -975,10 +1015,11 @@ def frame_seismic_report(frame_checks) -> str:
     return "\n".join(lines)
 
 
-def _detailed_calcs(rr: RowResult) -> list[str]:
+def _detailed_calcs(rr: RowResult, checks=None) -> list[str]:
     """Full equations, each shown symbolically then with substituted numbers and
     a specific code reference, so every value can be verified by hand."""
     a = rr.assessment
+    checks = a.checks if checks is None else checks
     prov = a.provisions
     d = rr.design
     s = rr.shaft
@@ -1187,7 +1228,7 @@ def _detailed_calcs(rr: RowResult) -> list[str]:
          f"{g.delta_c:.2f} ≥ {g.demand.disp_demand:.2f} in  "
          f"(D/C = {g.demand.disp_demand/g.delta_c:.2f})", R["dc"],
          status=g.delta_c >= g.demand.disp_demand)
-    mud_lim = next((c.capacity for c in a.checks
+    mud_lim = next((c.capacity for c in checks
                     if c.name == "Displacement ductility demand"), 5.0)
     _chk(add, "Ductility demand", "μd = Δd/Δy ≤ μd,limit",
          f"{mu_d:.2f} ≤ {mud_lim:g}", R["mud"], status=mu_d <= mud_lim)
@@ -1249,9 +1290,9 @@ def _detailed_calcs(rr: RowResult) -> list[str]:
     add("### 7 · Longitudinal & transverse reinforcement limits")
     add(f"*Ref: {prov.ref_longitudinal}; {prov.ref_transverse}.*")
     add("")
-    rho_l_min = next((c.demand for c in a.checks
+    rho_l_min = next((c.demand for c in checks
                       if c.name == "Longitudinal steel ratio (min)"), 0.01)
-    rho_l_max = next((c.capacity for c in a.checks
+    rho_l_max = next((c.capacity for c in checks
                       if c.name == "Longitudinal steel ratio (max)"), 0.04)
     add("**Longitudinal steel (column):**")
     _eq(add, "ρl", "Ast/Ag", f"{sec.Ast:.2f}/{sec.Ag:.0f}",
@@ -1318,14 +1359,14 @@ def _detailed_calcs(rr: RowResult) -> list[str]:
          f"{mc.Mp:.0f}/{L:.0f} = {Vp:.1f} ≥ "
          f"{prov.min_strength_factor:g}·{a.P_used:.0f} = {minv:.1f} kip",
          R["minv"], status=Vp >= minv)
-    ck_axr = _find(a.checks, "Axial load ratio")
+    ck_axr = _find(checks, "Axial load ratio")
     if ck_axr is not None:
         rho_dl = a.P_used / (min(d.fc, 5.0) * sec.Ag)
         _chk(add, "Axial load ratio", "ρdl = Pdl/(f'c·Ag) ≤ 0.15  (f'c ≤ 5 ksi)",
              f"{a.P_used:.0f}/({min(d.fc,5.0):.1f}·{sec.Ag:.0f}) = "
              f"{rho_dl:.3f} ≤ {ck_axr.capacity:g}", prov.ref_max_axial,
              status=ck_axr.passed)
-    ck_axm = _find(a.checks, "Maximum axial load")
+    ck_axm = _find(checks, "Maximum axial load")
     if ck_axm is not None:
         pcap = prov.max_axial_coeff * d.fc * sec.Ag
         _chk(add, f"Max axial load (applies when μd > 2; μd = {mu_d:.2f})",
@@ -1338,12 +1379,12 @@ def _detailed_calcs(rr: RowResult) -> list[str]:
     add("### 9 · Detailing")
     add(f"*Ref: {prov.ref_detailing}.*")
     add("")
-    _detailing_calcs(add, a, d)
+    _detailing_calcs(add, a, d, checks)
 
     return lines
 
 
-def _detailing_calcs(add, a, d) -> None:
+def _detailing_calcs(add, a, d, checks=None) -> None:
     """Render each detailing check that ran: symbolic limit + its verified note.
 
     Values come from the assessment's Check objects so the report always agrees
@@ -1366,7 +1407,7 @@ def _detailing_calcs(add, a, d) -> None:
             ("ρs,shaft ≥ 0.5·ρs,col", "SGS 8.8.12"),
     }
     any_shown = False
-    for c in a.checks:
+    for c in (a.checks if checks is None else checks):
         form = forms.get(c.name)
         if form is None:
             continue

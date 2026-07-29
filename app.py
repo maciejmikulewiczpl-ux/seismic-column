@@ -1258,17 +1258,28 @@ if "summary" in st.session_state:
                         "not.")
                     st.dataframe(pd.DataFrame([{
                         "Member": m.name,
-                        "Mo at interface (kip-ft)": round(m.Mo_interface / 12),
-                        "Vo at interface (kip)": round(m.Vo_interface),
-                        "Vo, fixed-free basis (kip)": round(m.Vo_cantilever),
+                        "Mo interface (kip-ft)": round(m.Mo_interface / 12),
+                        "Vo interface (kip)": round(m.Vo_interface),
+                        "Vo fixed-free (kip)": round(m.Vo_cantilever),
                         "Amplification": f"{m.shear_amplification:.2f}×",
+                        "M below ground (kip-ft)": (
+                            None if m.shaft_solution is None
+                            else round(m.shaft_moment / 12)),
+                        "Mp shaft (kip-ft)": round(m.shaft_Mp / 12),
+                        "D/C": (None if m.shaft_solution is None
+                                else round(m.shaft_dc, 2)),
+                        "Shaft": ("—" if m.shaft_solution is None
+                                  else ("YIELDS" if m.shaft_dc > 1 else "OK")),
                     } for m in fc.members]), width="stretch", hide_index=True)
                     st.caption(
-                        "Re-run the p-y in-ground demand at that head "
-                        "condition and size the shaft for the resulting M/V "
-                        "envelope. This app does not do that — the in-ground "
-                        "figures in the per-column drill-down are on the "
-                        "fixed-free basis.")
+                        "The below-ground columns are a p-y solve at this "
+                        "mechanism's head condition — V = Vo with M = Mo "
+                        "applied at the head, so the interface lands on Mo "
+                        "rather than the 2·Mo that applying the shear alone "
+                        "would give. The sign is verified against the "
+                        "interface moment on every solve. A D/C above 1.00 is "
+                        "reported, not failed: this is closed-form plastic "
+                        "analysis, not a pushover.")
 
                 st.caption(
                     "Moment diagram — the shear that brings each candidate "
@@ -1481,7 +1492,18 @@ if "summary" in st.session_state:
                         "p-y curves (CSV)", py_df.to_csv(index=False).encode(),
                         f"py_curves_{rr.name}.csv", "text/csv")
 
-        report_md = column_report(rr)
+        _views = ["envelope", *rr.assessment.directions]
+        _view = "envelope"
+        if len(rr.assessment.directions) > 1:
+            _view = st.radio(
+                "Checks shown", _views, horizontal=True,
+                key=f"report_view_{rr.name}", format_func=str.capitalize,
+                help="The row passes or fails on the ENVELOPE — the worse of "
+                     "both directions. The single-direction views are for "
+                     "inspection; only the checks change, since the section, "
+                     "moment-curvature, p-y and shaft-protection numbers are "
+                     "direction-independent.")
+        report_md = column_report(rr, view=_view)
         st.markdown(report_md)
         st.download_button("Download report (Markdown)", report_md.encode(),
-                           f"report_{rr.name}.md", "text/markdown")
+                           f"report_{rr.name}_{_view}.md", "text/markdown")

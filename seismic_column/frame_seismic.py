@@ -107,7 +107,20 @@ class MemberCheck:
     Mo_interface: float = 0.0   # overstrength moment at the top of shaft, kip-in
     Vo_interface: float = 0.0   # overstrength shear there, kip
     Vo_cantilever: float = 0.0  # what the fixed-free suite designed it for, kip
+    # Below-ground shaft demand at THIS mechanism's head condition (p-y).
+    # Zero for a fixed-free member: there the mechanism is the cantilever the
+    # per-bent suite already solved, so its numbers stand.
+    shaft_moment: float = 0.0   # max |M| below ground, kip-in
+    shaft_shear: float = 0.0    # max |V| below ground, kip
+    shaft_Mp: float = 0.0       # shaft plastic moment available, kip-in
+    shaft_solution: object = None
     warnings: list[str] = field(default_factory=list)
+
+    @property
+    def shaft_dc(self) -> float:
+        """Below-ground flexural demand/capacity. >1 means the shaft yields."""
+        return (self.shaft_moment / self.shaft_Mp if self.shaft_Mp > 0
+                else float("nan"))
 
     @property
     def first_hinge(self) -> Section:
@@ -215,8 +228,45 @@ def _second_hinge(sections: list[Section], first: Section, V1: float,
     return best, best_V
 
 
+def _shaft_demand(a, Mo_int: float, Vo_int: float, soil_bounds, warn: list):
+    """Below-ground shaft demand at the fixed-fixed mechanism's head condition.
+
+    The column mechanism holds the top of shaft at ``Mp_col``, so the shaft head
+    sees the SAME overstrength moment as the cantilever case but twice the
+    shear.  Passing the shear alone would put ``2*Mo`` at the interface and
+    overstate the demand, hence the head moment.
+
+    The head-moment sign is verified, not assumed: the solver's DOF-1 convention
+    is the opposite of the obvious hand derivation, and getting it wrong lands
+    ``3*Mo`` at the interface — a 3x error that would look plausible in a table.
+    So the returned interface moment is checked against ``Mo`` and the result
+    discarded if it disagrees.
+    """
+    from .sdc_capacity import inground_demand      # circular at module level
+
+    if a.soil_profile is None:                     # multiplier-based fixity
+        return 0.0, 0.0, None
+    M, V, sol = inground_demand(
+        a.H_free, a.shaft_embed_length, a.EI_col, a.EI_shaft, a.shaft_D,
+        a.P_used, a.soil_profile, Vo_int, soil_bounds, M_head=Mo_int)
+    if sol is None:
+        warn.append("the p-y solve for the fixed-fixed shaft demand was "
+                    "unstable on every soil bound — below-ground demand not "
+                    "established")
+        return 0.0, 0.0, None
+    at_interface = abs(sol.moment[sol.ground_index])
+    if abs(at_interface - Mo_int) > 0.10 * Mo_int:
+        warn.append(
+            f"the fixed-fixed shaft solve was discarded: it put "
+            f"{at_interface/12:.0f} kip-ft at the interface against the "
+            f"{Mo_int/12:.0f} kip-ft the mechanism requires, so the head "
+            f"condition is not being applied as intended")
+        return 0.0, 0.0, None
+    return M, V, sol
+
+
 def check_frame(frame, direction: str, bound: int, assessments: dict, spectrum,
-                provisions) -> FrameCheck:
+                provisions, soil_bounds=(2.0, 0.5)) -> FrameCheck:
     """Check every member of ``frame`` against the frame's displacement demand.
 
     ``assessments`` maps pier name -> ``ColumnAssessment``.  Each member is taken
@@ -281,13 +331,24 @@ def check_frame(frame, direction: str, bound: int, assessments: dict, spectrum,
         lam = provisions.overstrength_factor
         Mo_int, Vo_int = lam * Mp_col, lam * V_mech
         Vo_cant = lam * Mp_col / H
+        sh_M = sh_V = 0.0
+        sh_sol = None
         if ef != "free" and Vo_int > Vo_cant * 1.01:
             warn.append(
-                f"the shaft must be capacity-designed for this mechanism: same "
+                f"the shaft is capacity-designed for this mechanism: same "
                 f"Mo = {Mo_int/12:.0f} kip-ft at the interface, but "
                 f"Vo = {Vo_int:.0f} kip — {Vo_int/Vo_cant:.2f}× the "
-                f"{Vo_cant:.0f} kip the fixed-free suite sized it for. Re-run "
-                f"the p-y in-ground demand at that head condition")
+                f"{Vo_cant:.0f} kip the fixed-free suite sized it for")
+            sh_M, sh_V, sh_sol = _shaft_demand(a, Mo_int, Vo_int, soil_bounds,
+                                               warn)
+            if sh_sol is not None and sh_M > a.mc_shaft.Mp:
+                warn.append(
+                    f"the SHAFT would yield below ground under this mechanism: "
+                    f"M = {sh_M/12:.0f} kip-ft against Mp_shaft = "
+                    f"{a.mc_shaft.Mp/12:.0f} kip-ft, D/C = "
+                    f"{sh_M/a.mc_shaft.Mp:.2f}. Reported, not failed — the "
+                    f"fixed-fixed mechanism is a closed-form idealisation; a "
+                    f"pushover should settle it before the shaft is resized")
 
         delta_y = V_mech * flex
         d = dem
@@ -305,12 +366,15 @@ def check_frame(frame, direction: str, bound: int, assessments: dict, spectrum,
             pdelta_ok=(a.P_used * delta_d
                        <= provisions.pdelta_factor * a.mc_col.Mp),
             Mo_interface=Mo_int, Vo_interface=Vo_int, Vo_cantilever=Vo_cant,
+            shaft_moment=sh_M, shaft_shear=sh_V, shaft_Mp=a.mc_shaft.Mp,
+            shaft_solution=sh_sol,
             warnings=warn))
     return fc
 
 
 def check_all(balance, assessments: dict, spectrum, provisions,
-              continuous_only: bool = True) -> list[FrameCheck]:
+              continuous_only: bool = True,
+              soil_bounds=(2.0, 0.5)) -> list[FrameCheck]:
     """Every frame worth checking, both directions, every fixity bound.
 
     Single-bent frames reduce to the per-bent cantilever the seismic suite
@@ -324,5 +388,5 @@ def check_all(balance, assessments: dict, spectrum, provisions,
                 continue
             for bound in range(f.n_bounds):
                 out.append(check_frame(f, direction, bound, assessments,
-                                       spectrum, provisions))
+                                       spectrum, provisions, soil_bounds))
     return out

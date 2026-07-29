@@ -104,3 +104,42 @@ def test_no_transverse_weight_means_one_direction():
     a = _assess(weight=1000.0, weight_trans=None)
     assert not a.two_direction
     assert list(a.directions) == [LONGITUDINAL]
+
+
+# --- head moment in the pile solver ----------------------------------------
+def test_head_moment_defaults_to_the_free_head_solve():
+    """M_head=0 must reproduce the cantilever solve exactly, not approximately."""
+    import numpy as np
+
+    from seismic_column.pile_solver import solve_lateral
+    from seismic_column.soil import SoilProfile, SoilLayer
+
+    soil = SoilProfile((SoilLayer(thickness=900.0, py_model="elastic_subgrade",
+                                  gamma_eff=0.0, k_py=0.5),))
+    args = (300.0, 600.0, 2.0e9, 6.0e9, 84.0, 500.0, soil)
+    base = solve_lateral(*args, 400.0)
+    zero = solve_lateral(*args, 400.0, M_head=0.0)
+    assert np.array_equal(base.moment, zero.moment)
+    assert np.array_equal(base.y, zero.y)
+
+
+def test_head_moment_sign_puts_Mp_at_the_interface():
+    """The fixed-fixed head condition: V = 2Mp/H with M = +Mp gives Mp there.
+
+    The solver's DOF-1 convention is the opposite of the obvious hand
+    derivation — the wrong sign lands 3*Mp at the interface, which is exactly
+    the error :func:`frame_seismic._shaft_demand` guards against.
+    """
+    from seismic_column.pile_solver import solve_lateral
+    from seismic_column.soil import SoilProfile, SoilLayer
+
+    soil = SoilProfile((SoilLayer(thickness=900.0, py_model="elastic_subgrade",
+                                  gamma_eff=0.0, k_py=0.5),))
+    H, Mp = 300.0, 3.0e5
+    args = (H, 600.0, 2.0e9, 6.0e9, 84.0, 500.0, soil)
+    right = solve_lateral(*args, 2 * Mp / H, M_head=+Mp)
+    wrong = solve_lateral(*args, 2 * Mp / H, M_head=-Mp)
+    m_right = abs(right.moment[right.ground_index])
+    m_wrong = abs(wrong.moment[wrong.ground_index])
+    assert m_right == pytest.approx(Mp, rel=0.10)
+    assert m_wrong > 2.0 * Mp                  # the 3x error the guard catches

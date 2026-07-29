@@ -81,6 +81,7 @@ def solve_lateral(
     soil: SoilProfile,
     V_head: float,
     *,
+    M_head: float = 0.0,
     target_h: float | None = None,
     max_nodes: int = 241,
     max_iter: int = 100,
@@ -92,6 +93,14 @@ def solve_lateral(
     ``V_head`` is the lateral load at the column top (use ``Mp/Hcol`` for the
     effective/secant head stiffness at yield). ``target_h`` sets the element
     length (default ≈ D_shaft/4, capped by ``max_nodes``).
+
+    ``M_head`` is an applied MOMENT at the column top, zero by default — which
+    is the free-head cantilever this has always solved.  It exists for the
+    fixed-fixed member, whose deck end carries moment: with a hinge there the
+    diagram is ``M(x) = V*x - Mp``, so passing ``V_head = 2*Mp/Hcol`` together
+    with ``M_head = -Mp`` lands the interface on ``+Mp`` — the same interface
+    moment as the cantilever but twice the shear.  Passing the shear alone
+    would put ``2*Mp`` at the interface and overstate the shaft demand.
     """
     L_total = Hcol + L_embed
     h_t = target_h if target_h else max(D_shaft / 4.0, L_total / (max_nodes - 1))
@@ -129,6 +138,9 @@ def solve_lateral(
                 ab0[_BW + ia - jb, jb] += ke[a, b]
     F = np.zeros(ndof)
     F[0] = V_head                                     # lateral load at column top
+    F[1] = M_head                                     # ... and moment there (DOF 1
+    #                                                   is the head rotation; 0 =
+    #                                                   free head, as it always was)
     spring_dofs = [2 * i for i in range(n_node) if embedded[i]]
     spring_depth = [depth[i] for i in range(n_node) if embedded[i]]
     spring_trib = [trib[i] for i in range(n_node) if embedded[i]]

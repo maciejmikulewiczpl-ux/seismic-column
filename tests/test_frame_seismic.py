@@ -116,6 +116,10 @@ class _Assessment:
         self.mc_col, self.mc_shaft = _MC(Mp_col), _MC(Mp_shaft)
         self.Lp, self.P_used = 30.0, 500.0
         self.bounds = [_Bound()]
+        # multiplier-based fixity: no p-y model, so the fixed-fixed shaft
+        # demand is skipped and only the head forces are reported
+        self.soil_profile, self.shaft_embed_length = None, 0.0
+        self.H_free = Hcol + silo
 
 
 class _Provisions:

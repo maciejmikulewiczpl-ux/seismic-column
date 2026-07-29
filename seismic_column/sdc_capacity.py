@@ -468,13 +468,17 @@ _PILE_CACHE: dict[tuple, PileSolution] = {}
 
 
 def _cached_pile_solve(Hcol, L_embed, EI_col, EI_shaft, D_shaft, axial,
-                       soil: SoilProfile, V_head) -> PileSolution:
+                       soil: SoilProfile, V_head,
+                       M_head: float = 0.0) -> PileSolution:
+    # M_head MUST be in the key: a fixed-fixed solve shares every other argument
+    # with the cantilever one and would otherwise collide with it in the cache.
     key = (round(Hcol, 3), round(L_embed, 3), round(EI_col, 0), round(EI_shaft, 0),
-           round(D_shaft, 3), round(axial, 3), round(V_head, 3), soil.signature())
+           round(D_shaft, 3), round(axial, 3), round(V_head, 3),
+           round(M_head, 3), soil.signature())
     sol = _PILE_CACHE.get(key)
     if sol is None:
         sol = solve_lateral(Hcol, L_embed, EI_col, EI_shaft, D_shaft, axial,
-                            soil, V_head)
+                            soil, V_head, M_head=M_head)
         if len(_PILE_CACHE) > 4000:
             _PILE_CACHE.clear()
         _PILE_CACHE[key] = sol
@@ -483,7 +487,7 @@ def _cached_pile_solve(Hcol, L_embed, EI_col, EI_shaft, D_shaft, axial,
 
 def inground_demand(Hcol, L_embed, EI_col, EI_shaft, D_shaft, axial,
                     soil_profile: SoilProfile, V_head,
-                    soil_bounds=(2.0, 0.5)):
+                    soil_bounds=(2.0, 0.5), M_head: float = 0.0):
     """Max below-ground shaft moment & shear at the applied head force ``V_head``.
 
     Runs the p-y solve over the soil-stiffness bounds (envelope) and returns
@@ -497,7 +501,7 @@ def inground_demand(Hcol, L_embed, EI_col, EI_shaft, D_shaft, axial,
         prof = replace(soil_profile,
                        stiffness_factor=soil_profile.stiffness_factor * factor)
         s = _cached_pile_solve(Hcol, L_embed, EI_col, EI_shaft, D_shaft, axial,
-                               prof, V_head)
+                               prof, V_head, M_head)
         if not s.stable:
             continue
         if s.max_inground_moment >= M:
