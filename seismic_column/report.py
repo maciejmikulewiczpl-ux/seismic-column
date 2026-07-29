@@ -525,6 +525,25 @@ def balance_report(balance) -> str:
     add(f"*{END_CONDITION_NOTE}*")
     add("")
 
+    # --- the two frame layouts side by side, so the split is unmissable ---
+    add("**The two directions do not see the same structure.** Which bents act "
+        "together is derived from `deck_link`, so a bearing released "
+        "longitudinally but shear-keyed transversely joins the frame one way "
+        "and stands alone the other:")
+    add("")
+    add("```")
+    for d in DIRECTIONS:
+        layout = "  |  ".join(
+            ("[" + " ".join(fr.names) + "]") if fr.continuous else fr.names[0]
+            for fr in balance.frames.get(d, []))
+        add(f"{d:14s} {layout}")
+    add("```")
+    add("")
+    add("Square brackets mark a **continuous** frame — the only place a "
+        "balanced-stiffness rule applies. Everything else is a single-bent "
+        "frame, compared to its neighbours on period alone.")
+    add("")
+
     n_b = max((len(b.k) for b in balance.bents), default=0)
     for direction in DIRECTIONS:
         frames = balance.frames.get(direction, [])
@@ -551,6 +570,47 @@ def balance_report(balance) -> str:
                     row += " — | — |"
             add(row)
         add("")
+
+        # --- worked derivation for every CONTINUOUS frame in this direction ---
+        for f in frames:
+            if not f.continuous:
+                continue
+            add(f"#### {f.key} — period derivation, {direction}")
+            add("")
+            add(f"{len(f.members)} bents act together here "
+                f"({' + '.join(f.names)}), so the frame has ONE period, not "
+                f"{len(f.members)}. Rigid deck, so the members deflect together "
+                f"and their stiffnesses add.")
+            add("")
+            for i in range(f.n_bounds):
+                lbl = f.label(i)
+                add(f"**Fixity bound: {lbl}**")
+                add("")
+                ks = " + ".join(f"{b.stiffness(direction, i):.2f}"
+                                for b in f.members)
+                ms = " + ".join(f"{b.mass(direction):.3f}" for b in f.members)
+                _eq(add, f"K_frame [{lbl}]", "Σ kᵢ  over the members that resist",
+                    ks, f"{f.K(i):.2f} kip/in",
+                    ref=f"members: {', '.join(f.names)} — each at its own end "
+                        f"condition ({f.end_conditions})")
+                _eq(add, "M_frame", "Σ mᵢ  in this direction", ms,
+                    f"{f.M():.4f} kip·s²/in  "
+                    f"(W = {f.M() * 386.088:.0f} kip)",
+                    ref="entered tributary weight + participating column "
+                        "self-weight, ÷ g")
+                T = f.T(i)
+                add(f"- **T_frame [{lbl}]** = 2π · √(M_frame / K_frame)"
+                    f"  &nbsp;*[{cr.ref_geometry}]*  ")
+                add(f"  = 2π · √({f.M():.4f} / {f.K(i):.2f}) "
+                    f"= 2π · √({f.M() / f.K(i):.6f}) = **{T:.3f} s**")
+                add("")
+                # what each bent would have said on its own, for contrast
+                own = ", ".join(f"{b.name} {b.T(direction, i):.3f} s"
+                                for b in f.members)
+                add(f"  *Individually the bents would give {own} — the frame "
+                    f"period is not any one of them.*")
+                add("")
+            add("")
 
     # ------------------------------------------------------------------
     add("## Bents")
