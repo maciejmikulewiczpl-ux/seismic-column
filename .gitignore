@@ -12,3 +12,9 @@ seismic_project_EN.json
 seismic_project_EN_solved.json
 balance_report_EN.md
 seismic_project_EN_framed.json
+seismic_project_EN_minsilo.json
+seismic_project_EN_alt_shallow.json
+seismic_project_EN_alt_mild.json
+balance_report_EN*.md
+EN_configurations.json
+EN_configurations.md
