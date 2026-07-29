@@ -443,6 +443,7 @@ def optimize_column(
     end_fixity: dict | None = None,
     n_columns: int = 1,
     col_spacing: float = 0.0,
+    cap_fixity: str = "fixed",
     fixity_multipliers: tuple[float, ...] = (3.0, 6.0),
     shaft_moment_basis: str = "interface",
     lle_spectrum=None,
@@ -496,7 +497,7 @@ def optimize_column(
         # gives them different axial and so different Mp, Vo and capacity.  With
         # n_columns == 1 evaluate_bent is a pass-through, so nothing moves.
         b = evaluate_bent(
-            n_columns, col_spacing, axial,
+            n_columns, col_spacing, axial, cap_fixity=cap_fixity,
             column=d.section(), shaft=shaft.section(), geometry=geom_d,
             spectrum=spectrum, weight=weight,
             weight_trans=weight_trans, demand_basis=demand_basis,

@@ -190,3 +190,44 @@ def test_wide_bents_work_and_only_the_extremes_are_analysed(n):
 def test_a_wide_bent_says_how_the_interior_columns_were_treated():
     b = evaluate_bent(4, 15 * 12.0, 2800.0, **_kw())
     assert any("interior" in m for m in b.log)
+
+
+# --- a PINNED cap removes the frame action entirely ------------------------
+def test_a_pinned_cap_develops_no_push_pull_couple():
+    """Statics: V*H = sum(Mo) and the base moments are sum(Mo), so nothing left.
+
+    Physically each column becomes an independent cantilever — there is no cap
+    moment to transfer, so no couple between the columns.
+    """
+    b = evaluate_bent(2, 30 * 12.0, 1400.0, cap_fixity="pinned", **_kw())
+    assert b.multi
+    assert b.delta_P == 0.0
+    assert all(p.delta_P == 0.0 for p in b.positions)
+    assert all(p.axial == pytest.approx(700.0) for p in b.positions)
+    assert any("PINNED" in m for m in b.log)
+
+
+def test_a_pinned_cap_stays_fixed_free_transversely_and_halves_Vo():
+    fixed = evaluate_bent(2, 30 * 12.0, 1400.0, cap_fixity="fixed", **_kw())
+    pinned = evaluate_bent(2, 30 * 12.0, 1400.0, cap_fixity="pinned", **_kw())
+    assert pinned.positions[0].assessment.directions[TRANSVERSE].end_fixity == "free"
+    assert fixed.positions[0].assessment.directions[TRANSVERSE].end_fixity == "fixed"
+    # one hinge instead of two, at the same axial -> half the overstrength shear
+    pin_Vo = pinned.positions[0].assessment.directions[TRANSVERSE].Vo
+    mid_Vo = evaluate_bent(1, 0.0, 700.0, **_kw()).assessment \
+        .directions[TRANSVERSE].Vo
+    assert pin_Vo == pytest.approx(mid_Vo)
+
+
+def test_a_pinned_cap_is_softer_in_the_balance_layer():
+    from seismic_column.balance import BentStiffness
+    def bs(cap):
+        return BentStiffness(name="B", frame="F", order=0, Hcol=240.0, silo=0.0,
+                             k=(100.0,), mass_long=4.0, mass_trans=4.0,
+                             deck_link="pinned", n_columns=2, k_fixed=(400.0,),
+                             cap_fixity=cap, bound_labels=("best",))
+    assert bs("fixed").end_fixity(TRANSVERSE) == "fixed"
+    assert bs("pinned").end_fixity(TRANSVERSE) == "free"
+    # two columns either way, but the pinned cap keeps the cantilever stiffness
+    assert bs("pinned").stiffness(TRANSVERSE, 0) == pytest.approx(200.0)
+    assert bs("fixed").stiffness(TRANSVERSE, 0) == pytest.approx(800.0)

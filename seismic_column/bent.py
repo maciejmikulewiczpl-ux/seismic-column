@@ -128,6 +128,7 @@ def couple_axials(n: int, spacing: float, M_ot: float) -> list[float]:
 
 def evaluate_bent(n_columns: int, spacing: float, axial: float,
                   end_fixity: dict | None = None, demand_basis: dict | None = None,
+                  cap_fixity: str = "fixed",
                   max_passes: int = 8, tol: float = 0.01,
                   **kw) -> BentAssessment:
     """Assess a bent of ``n_columns`` identical columns.
@@ -161,8 +162,28 @@ def evaluate_bent(n_columns: int, spacing: float, axial: float,
         pos = ColumnPosition(0, 0.0, 0.0, P_dead, a)
         return BentAssessment(1, spacing, [pos], list(a.checks), pos)
 
-    # The cap holds the column heads against rotation, so transversely the bent
-    # is a portal frame -- fixed-fixed -- not the cantilever a single column is.
+    # A PINNED cap develops no frame action at all: hinge at the base only, so
+    # V*H = sum(Mo) and the base moments are already sum(Mo) -- the couple is
+    # exactly zero and each column is an independent cantilever.  So there is
+    # nothing to iterate and nothing to envelope beyond the single run.
+    if cap_fixity == "pinned":
+        a = evaluate_column(axial=P_dead, end_fixity=ef or None,
+                            demand_basis=demand_basis, **kw)
+        xs0 = offsets(n_columns, spacing)
+        poss = [ColumnPosition(i, x, 0.0, P_dead, a)
+                for i, x in enumerate(xs0)]
+        return BentAssessment(
+            n_columns, spacing, poss, list(a.checks), poss[0],
+            converged=True, iterations=0,
+            log=[f"{n_columns} columns at {spacing/12:.1f} ft with a PINNED "
+                 f"cap: each column is an independent cantilever, so there is "
+                 f"no push/pull couple (V·H = ΣMo is taken entirely by the base "
+                 f"moments) and the transverse head stays fixed-FREE. Vo is "
+                 f"Mo/H, half the monolithic-cap value."])
+
+    # A monolithic cap holds the column heads against rotation, so transversely
+    # the bent is a portal frame -- fixed-fixed -- not the cantilever a single
+    # column is.
     ef[TRANSVERSE] = "fixed"
     xs = offsets(n_columns, spacing)
     log: list[str] = []

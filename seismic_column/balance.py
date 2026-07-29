@@ -117,6 +117,7 @@ class BentStiffness:
     mass_trans: float = float("nan")  # ... and transversely, kip*s^2/in
     deck_link: str = "pinned"
     n_columns: int = 1            # columns in this bent; they act in parallel
+    cap_fixity: str = "fixed"     # transverse column-to-cap: fixed | pinned
     bound_labels: tuple[str, ...] = ()
     # Fixed-FIXED stiffness per bound, used longitudinally for an integral bent.
     # Defaults to the fixed-free values when the caller has not computed it.
@@ -154,7 +155,8 @@ class BentStiffness:
           the bent acts as a portal frame.  This is the case that inverts the
           otherwise reliable rule that transverse is always fixed-free.
         """
-        if self.n_columns > 1 and direction == TRANSVERSE:
+        if (self.n_columns > 1 and direction == TRANSVERSE
+                and self.cap_fixity != "pinned"):
             return "fixed"
         return ("fixed" if self.deck_link == "integral"
                 and direction == LONGITUDINAL else "free")
@@ -319,7 +321,8 @@ class BalanceResult:
 def bent_stiffness(name: str, frame: str, order: int, assessment,
                    Hcol: float, silo: float, mass_long: float,
                    mass_trans: float, deck_link: str = "pinned",
-                   D_shaft: float = 0.0, n_columns: int = 1) -> BentStiffness:
+                   D_shaft: float = 0.0, n_columns: int = 1,
+                   cap_fixity: str = "fixed") -> BentStiffness:
     """Collect a row's stiffnesses straight off its assessment bounds.
 
     No new mechanics: ``k`` is the effective (cracked, ``EI = Mp/phi_y``) lateral
@@ -358,7 +361,8 @@ def bent_stiffness(name: str, frame: str, order: int, assessment,
     # multi-column bent transversely (the cap restrains the heads).  Either way
     # the second stiffness is needed.
     k_fixed: tuple[float, ...] = ()
-    if (deck_link == "integral" or n_columns > 1) and D_shaft > 0:
+    if (deck_link == "integral"
+            or (n_columns > 1 and cap_fixity != "pinned")) and D_shaft > 0:
         geom = Geometry(Hcol=Hcol, D_shaft=D_shaft, silo=silo)
         k_fixed = tuple(
             geom.lateral_stiffness(assessment.EI_col, assessment.EI_shaft,
@@ -370,7 +374,7 @@ def bent_stiffness(name: str, frame: str, order: int, assessment,
         k=tuple(bounds[i].stiffness for i in keep),
         mass_long=mass_long, mass_trans=mass_trans, deck_link=deck_link,
         bound_labels=tuple(labels[i] for i in keep), k_fixed=k_fixed,
-        n_columns=n_columns,
+        n_columns=n_columns, cap_fixity=cap_fixity,
     )
 
 

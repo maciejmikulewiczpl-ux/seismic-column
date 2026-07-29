@@ -33,6 +33,7 @@ COLUMNS: tuple[str, ...] = (
     "silo_ft",
     "n_columns",
     "col_spacing_ft",
+    "cap_fixity",
     "D_shaft_in",
     "weight_long_kip",
     "weight_trans_kip",
@@ -59,7 +60,24 @@ COLUMNS: tuple[str, ...] = (
     "shaft_spiral_bundle",
 )
 
-TEXT_COLUMNS: tuple[str, ...] = ("name", "frame", "deck_link")
+TEXT_COLUMNS: tuple[str, ...] = ("name", "frame", "deck_link", "cap_fixity")
+
+# How the columns of a MULTI-column bent meet the cap, TRANSVERSELY.  (The
+# longitudinal head condition comes from ``deck_link``, so "pinned one way,
+# moment the other" is expressed by setting the two independently.)
+#
+#   fixed   monolithic cap: hinge at the cap AND the base, so the bent is a
+#           portal frame -- fixed-fixed, V = 2*Mp/H, and the overturning
+#           develops an axial push/pull couple of sum(Mo) between the columns.
+#   pinned  a detailed pin: hinge at the base only, so each column is an
+#           INDEPENDENT cantilever -- fixed-free, V = Mp/H, and NO couple at
+#           all.  Statics: V*H = sum(Mo) and the base moments are sum(Mo), so
+#           the couple is exactly zero.
+#
+# Pinning therefore does three things at once -- roughly quarters the transverse
+# stiffness, halves Vo, and removes the axial swing -- which makes it a powerful
+# lever when a fixed-cap bent will not work.
+CAP_FIXITIES: tuple[str, ...] = ("fixed", "pinned")
 NUMERIC_COLUMNS = tuple(c for c in COLUMNS if c not in TEXT_COLUMNS)
 
 # How the deck attaches at a bent.  This is the physical detail; both which
@@ -112,6 +130,18 @@ COLUMN_META: dict[str, tuple[str, str]] = {
                   "axial, and so Mp, Vo, Df and capacity, at each position. "
                   "Longitudinally the columns simply act in parallel. The cap "
                   "beam and the column-to-cap joint are NOT checked."),
+    "cap_fixity": ("Column-to-cap (transverse)",
+                   "How the columns meet the cap, TRANSVERSELY (longitudinally "
+                   "the head condition comes from 'Deck connection', so a pin "
+                   "one way and a moment connection the other is set with the "
+                   "two together). 'fixed' = monolithic cap, so the bent is a "
+                   "portal frame: fixed-fixed, Vo = 2*Mo/H, and the overturning "
+                   "develops an axial push/pull couple between the columns. "
+                   "'pinned' = a detailed pin, so each column is an INDEPENDENT "
+                   "cantilever: fixed-free, Vo = Mo/H, and NO couple at all. "
+                   "Pinning roughly quarters the transverse stiffness, halves "
+                   "Vo and removes the axial swing. Ignored if the bent has one "
+                   "column."),
     "col_spacing_ft": ("Column spacing (ft)",
                        "Centre-to-centre spacing, needed only when the bent has "
                        "more than one column. This is the LEVER ARM of the "
@@ -406,6 +436,7 @@ def default_row(name: str = "C1") -> dict:
         # two columns existed.  Spacing is only read when n_columns > 1.
         "n_columns": 1,
         "col_spacing_ft": 0.0,
+        "cap_fixity": "fixed",
         "D_shaft_in": 84.0,
         "weight_long_kip": 800.0,
         "weight_trans_kip": 800.0,
@@ -555,6 +586,14 @@ def validate(df: pd.DataFrame, min_shaft_oversize: float = 0.0,
                        .fillna(1.0).round().astype("Int64"))
     df["col_spacing_ft"] = pd.to_numeric(
         df["col_spacing_ft"], errors="coerce").fillna(0.0)
+    # A monolithic cap is the usual multi-column detail, so it is the default;
+    # it is ignored entirely on a single-column bent.
+    df["cap_fixity"] = (df["cap_fixity"].fillna("").astype(str).str.strip()
+                        .str.lower().replace("", "fixed"))
+    bad_cap = sorted(set(df["cap_fixity"]) - set(CAP_FIXITIES))
+    if bad_cap:
+        raise ValueError(f"Unknown cap_fixity {bad_cap}; choose from "
+                         f"{list(CAP_FIXITIES)}")
     # Transverse weight defaults to the longitudinal one, so a table that never
     # distinguished them behaves exactly as before.
     df["weight_trans_kip"] = pd.to_numeric(

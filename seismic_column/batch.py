@@ -53,6 +53,7 @@ class RowResult:
     # GOVERNING column so every existing consumer keeps working; ``bent`` holds
     # the positions and the transverse push/pull between them.
     bent: BentAssessment | None = None
+    cap_fixity: str = "fixed"     # transverse column-to-cap detail
 
     @property
     def n_columns(self) -> int:
@@ -151,6 +152,7 @@ def run_row(row: pd.Series, cfg: GlobalConfig, on_candidate=None,
     weight = float(row["weight_long_kip"])   # seismic suite: unchanged basis
     n_cols = max(1, int(row.get("n_columns", 1) or 1))
     col_spacing = float(row.get("col_spacing_ft", 0.0) or 0.0) * 12.0
+    cap_fixity = str(row.get("cap_fixity", "fixed") or "fixed").strip().lower()
     # SDC 2.1 4.3.2 / SGS 4.9: a multi-column bent is allowed more displacement
     # ductility than a single-column one, having a redundant load path.
     if n_cols > 1:
@@ -177,6 +179,7 @@ def run_row(row: pd.Series, cfg: GlobalConfig, on_candidate=None,
             column, shaft, geometry, spectrum, axial, weight, spec=spec,
             weight_trans=w_trans, demand_basis=demand_basis,
             end_fixity=end_fixity, n_columns=n_cols, col_spacing=col_spacing,
+            cap_fixity=cap_fixity,
             fixity_multipliers=mults, shaft_moment_basis=cfg.shaft_moment_basis,
             lle_spectrum=lle_spectrum, lle_mu_limit=cfg.lle_mu_limit,
             concrete_unit_weight=cfg.concrete_unit_weight,
@@ -186,10 +189,11 @@ def run_row(row: pd.Series, cfg: GlobalConfig, on_candidate=None,
         )
         return RowResult(name, res.design, res.shaft, res.assessment, res.feasible,
                          True, res.log, frame=frame, silo=geometry.silo,
-                         deck_link=deck_link, weight_trans=w_trans)
+                         deck_link=deck_link, weight_trans=w_trans,
+                         cap_fixity=cap_fixity)
 
     bent = evaluate_bent(
-        n_cols, col_spacing, axial,
+        n_cols, col_spacing, axial, cap_fixity=cap_fixity,
         column=column.section(), shaft=shaft.section(), geometry=geometry,
         spectrum=spectrum, weight=weight,
         weight_trans=w_trans, demand_basis=demand_basis, end_fixity=end_fixity,
@@ -206,7 +210,8 @@ def run_row(row: pd.Series, cfg: GlobalConfig, on_candidate=None,
     return RowResult(name, column, shaft, assessment,
                      all(c.passed for c in bent.checks), False, list(bent.log),
                      frame=frame, silo=geometry.silo,
-                     deck_link=deck_link, weight_trans=w_trans, bent=bent)
+                     deck_link=deck_link, weight_trans=w_trans, bent=bent,
+                     cap_fixity=cap_fixity)
 
 
 def _criteria(cfg: GlobalConfig) -> BalanceCriteria:
@@ -249,6 +254,7 @@ def _build_bents(results: list[RowResult], order: dict[str, int],
         out.append(bent_stiffness(
             rr.name, rr.frame, order[rr.name], a,
             Hcol=a.Hcol_entered, silo=rr.silo, n_columns=rr.n_columns,
+            cap_fixity=rr.cap_fixity,
             mass_long=m_long, mass_trans=m_trans, deck_link=rr.deck_link,
             D_shaft=rr.shaft.D))
     return out
