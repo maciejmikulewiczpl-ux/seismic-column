@@ -27,6 +27,9 @@ from seismic_column.io_schema import (
     CAP_FIXITIES,
     COLUMNS,
     COLUMN_META,
+    deck_link_word,
+    deck_links,
+    frame_keys,
     GlobalConfig,
     SOIL_COLUMN_META,
     SOIL_COLUMNS,
@@ -100,6 +103,7 @@ _DEFAULTS = {
     # balanced stiffness / balanced frame geometry between adjacent piers
     "balance_check": True,
     "balance_mass_normalized": True,
+    "balance_simple_span_stiffness": False,
     "balance_k_ratio_min": 0.75,
     "balance_T_ratio_min": 0.70,
     "balance_auto_silo": True,
@@ -162,6 +166,7 @@ def _build_config() -> GlobalConfig:
         self_weight_in_axial=s("self_weight_in_axial"),
         balance_check=s("balance_check"),
         balance_mass_normalized=s("balance_mass_normalized"),
+        balance_simple_span_stiffness=s("balance_simple_span_stiffness"),
         balance_k_ratio_min=s("balance_k_ratio_min"),
         balance_T_ratio_min=s("balance_T_ratio_min"),
         balance_auto_silo=s("balance_auto_silo"),
@@ -214,6 +219,8 @@ def _load_project_into_state(df: pd.DataFrame, cfg: GlobalConfig) -> None:
     s["self_weight_in_axial"] = cfg.self_weight_in_axial
     s["balance_check"] = getattr(cfg, "balance_check", True)
     s["balance_mass_normalized"] = getattr(cfg, "balance_mass_normalized", True)
+    s["balance_simple_span_stiffness"] = getattr(
+        cfg, "balance_simple_span_stiffness", False)
     s["balance_k_ratio_min"] = getattr(cfg, "balance_k_ratio_min", 0.75)
     s["balance_T_ratio_min"] = getattr(cfg, "balance_T_ratio_min", 0.70)
     s["balance_auto_silo"] = getattr(cfg, "balance_auto_silo", True)
@@ -497,6 +504,18 @@ with st.sidebar:
              "AASHTO variable-width form (Eq. 4.1.2-4). Untick to compare k "
              "alone (AASHTO constant-width, Eq. 4.1.2-3). Spans in series with "
              "differing tributary masses want the normalised form.")
+    st.checkbox(
+        "Also balance the two piers of a simply supported span",
+        key="balance_simple_span_stiffness", disabled=not _bal,
+        help="UNTICKED (default): a run of simple spans is modelled one frame "
+             "per pier, so there is no pair inside a frame — adjacent piers "
+             "are matched on PERIOD only (balanced frame geometry). "
+             "TICKED: each simple span is read as a frame whose two supports "
+             "must also satisfy the adjacent balanced-stiffness limit. That is "
+             "the stricter reading, and it bites hardest where a multi-column "
+             "bent shares a span with a single-column one. Continuous frames "
+             "are checked either way — this switch only affects piers that are "
+             "alone in their frame.")
     bc1, bc2 = st.columns(2)
     bc1.number_input("Min adjacent k ratio", 0.5, 1.0, key="balance_k_ratio_min",
                      step=0.05, disabled=not _bal,
@@ -637,6 +656,40 @@ edited = st.data_editor(
     key=f"editor_{st.session_state['editor_version']}", column_config=col_config,
 )
 st.session_state["batch_df"] = edited
+
+# --- how the two comma-lists above were actually read ----------------------
+with st.expander("Articulation — how the `frame` and `deck connection` cells "
+                 "were read", expanded=False):
+    st.caption(
+        "`frame` and `deck connection` are read **in pairs**: the first link "
+        "goes with the first frame, and so on. One link is used for every "
+        "frame. This is what the analysis will use — if a row here does not "
+        "say what you meant, the cell above is wrong.")
+    _art = []
+    for _, _r in edited.iterrows():
+        _keys = frame_keys(_r.get("frame", ""))
+        if not _keys:
+            _art.append({"Pier": _r.get("name", ""), "Carries": "—",
+                         "Longitudinally": "excluded from the balance checks",
+                         "Transversely": "excluded from the balance checks"})
+            continue
+        _links = deck_links(_r.get("deck_link", ""), len(_keys))
+        _lon = [k for k, ln in zip(_keys, _links)
+                if ln == "integral" or ln == "pinned"]
+        _tra = [k for k, ln in zip(_keys, _links) if ln != "free"]
+        def _share(which):
+            if not which:
+                return "— (no deck: self weight only)"
+            f = "" if len(which) == 1 else "½ each: "
+            return f + " + ".join(which)
+        _art.append({
+            "Pier": _r.get("name", ""),
+            "Carries": " · ".join(f"{deck_link_word(ln)} → {k}"
+                                  for k, ln in zip(_keys, _links)),
+            "Longitudinally": _share(_lon),
+            "Transversely": _share(_tra),
+        })
+    st.dataframe(pd.DataFrame(_art), width="stretch", hide_index=True)
 
 col_a, col_b = st.columns(2)
 with col_a:

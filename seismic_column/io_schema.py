@@ -127,6 +127,21 @@ NUMERIC_COLUMNS = tuple(c for c in COLUMNS if c not in TEXT_COLUMNS)
 # a cantilever, so it stays fixed-free.  `pinned` is the default because a
 # simply supported span sits on bearings and transmits no moment.
 DECK_LINKS: tuple[str, ...] = ("integral", "pinned", "bearing", "free")
+# What bridge engineers actually say, mapped to the stored vocabulary.  A "pin"
+# and a "roller" are both bearings, so calling only the released one `bearing`
+# reads oddly at a table; accept either word and keep whichever was typed.
+DECK_LINK_ALIASES: dict[str, str] = {
+    "roller": "bearing", "expansion": "bearing", "exp": "bearing",
+    "guided": "bearing", "released": "bearing",
+    "pin": "pinned", "fixed": "pinned",
+    "monolithic": "integral",
+}
+
+
+def deck_link_word(link: str) -> str:
+    """How to SHOW a stored link -- the word an engineer would use."""
+    return {"bearing": "roller (expansion)", "pinned": "pin (fixed bearing)",
+            "integral": "integral", "free": "free"}.get(link, link)
 
 # Longitudinal / transverse.  Used as dict keys and check labels throughout.
 LONGITUDINAL, TRANSVERSE = "longitudinal", "transverse"
@@ -178,6 +193,7 @@ def deck_links(link: object, n_frames: int = 1) -> tuple[str, ...]:
     parts = [k.strip() for k in txt.replace(";", ",").split(",") if k.strip()]
     if not parts:
         parts = ["pinned"]
+    parts = [DECK_LINK_ALIASES.get(k, k) for k in parts]
     if len(parts) == 1:
         return tuple(parts * max(n_frames, 1))
     return tuple(parts)
@@ -347,6 +363,12 @@ class GlobalConfig:
     # run without the feature.
     balance_check: bool = True
     balance_mass_normalized: bool = True  # compare k/m (Caltrans form / SGS variable width)
+    # Hold the two piers of a SIMPLY SUPPORTED span to the balanced-stiffness
+    # rule as well.  Off by default: a run of simple spans is modelled one
+    # frame per pier, so there is no pair inside a frame and they are matched on
+    # period alone.  Whether the span itself counts as a frame whose supports
+    # must balance is a modelling choice, so it is yours to make.
+    balance_simple_span_stiffness: bool = False
     balance_k_ratio_min: float = 0.75     # min(ki,kj)/max(ki,kj), adjacent bents
     balance_k_ratio_any: float = 0.50     # ... any two bents in a frame
     balance_T_ratio_min: float = 0.70     # min(Ti,Tj)/max(Ti,Tj) for adjacent piers

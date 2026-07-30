@@ -1280,3 +1280,62 @@ def test_deck_link_list_must_line_up_with_the_frame_list():
     df["deck_link"] = ["pinned, bearing, integral", "pinned"]
     with pytest.raises(ValueError, match="one link per frame"):
         validate(df)
+
+
+# --- the simple-span stiffness switch --------------------------------------
+def _simple_run():
+    """Three piers in series, each its own frame — a run of simple spans."""
+    return [_bent("P1", [100.0], m=2.0, frame="S1", order=0, deck_link="pinned"),
+            _bent("P2", [300.0], m=2.0, frame="S2", order=1, deck_link="pinned"),
+            _bent("P3", [110.0], m=2.0, frame="S3", order=2, deck_link="pinned")]
+
+
+def test_simple_spans_are_matched_on_period_only_by_default():
+    checks = balance_checks(_simple_run(), BalanceCriteria())
+    assert not [c for c in checks
+                if c.name in (STIFFNESS_CHECK, STIFFNESS_ANY_CHECK)]
+    assert [c for c in checks if c.name == GEOMETRY_CHECK]
+
+
+def test_the_switch_holds_the_two_piers_of_a_span_to_the_adjacent_limit():
+    crit = BalanceCriteria(simple_span_stiffness=True)
+    checks = _long(balance_checks(_simple_run(), crit), STIFFNESS_CHECK)
+    assert [c.pair for c in checks] == [("P1", "P2"), ("P2", "P3")]
+    # k/m = 50 vs 150 vs 55 -> P1-P2 fails 0.75, P2-P3 fails, and no any-two
+    assert checks[0].ratio == pytest.approx(1 / 3)
+    assert not checks[0].passed
+    assert all(c.limit == crit.k_ratio_min for c in checks)
+    assert not [c for c in balance_checks(_simple_run(), crit)
+                if c.name == STIFFNESS_ANY_CHECK]
+
+
+def test_the_switch_leaves_continuous_frames_alone():
+    """A continuous frame is checked either way; the switch only reaches piers
+    that are alone in their frame."""
+    bents = _joint_pattern()
+    off = balance_checks(bents, BalanceCriteria())
+    on = balance_checks(bents, BalanceCriteria(simple_span_stiffness=True))
+    key = lambda cs: sorted((c.name, c.pair, c.direction) for c in cs)
+    assert key(off) == key(on)
+
+
+def test_the_switch_ignores_a_continuous_frame_with_one_active_member():
+    """F1 is B2+B3+B4 but B4 is released longitudinally, so only two members
+    resist there.  A continuous frame reduced to one member in a direction is
+    still NOT a simply supported span and must not be caught by the rule."""
+    crit = BalanceCriteria(simple_span_stiffness=True)
+    frames = {f.key: f for f in frames_for(_joint_pattern(), LONGITUDINAL)}
+    assert frames["F1"].names == ("B2", "B3")     # B4 released here ...
+    assert not frames["F1"].simple_span           # ... and three declared
+    ss = [c for c in balance_checks(_joint_pattern(), crit)
+          if c.name == STIFFNESS_CHECK and "–" in c.scope]
+    assert ss == []
+
+
+def test_engineer_vocabulary_is_accepted_for_deck_links():
+    from seismic_column.io_schema import deck_link_word, deck_links
+    assert deck_links("roller, pin", 2) == ("bearing", "pinned")
+    assert deck_links("expansion", 2) == ("bearing", "bearing")
+    assert deck_links("fixed", 1) == ("pinned",)
+    assert deck_link_word("bearing") == "roller (expansion)"
+    assert deck_link_word("pinned") == "pin (fixed bearing)"

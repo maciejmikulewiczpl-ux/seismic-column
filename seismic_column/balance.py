@@ -89,6 +89,12 @@ class BalanceCriteria:
     k_ratio_any: float = 0.50          # any two bents within a frame
     T_ratio_min: float = 0.70          # adjacent frames
     mass_normalized: bool = True
+    # Whether the two piers carrying one SIMPLY SUPPORTED span are checked
+    # against each other for balanced stiffness.  Off by default: a run of
+    # simple spans is modelled one frame per pier, and a frame holding a single
+    # pier has nothing to compare -- they are matched on period alone.  Turn it
+    # on to read each span as a frame whose two supports must also be balanced.
+    simple_span_stiffness: bool = False
     ref_stiffness: str = ""
     ref_stiffness_any: str = ""
     ref_geometry: str = ""
@@ -237,6 +243,14 @@ class Frame:
     # appears in BOTH frames at 0.5.  Its STIFFNESS is full in both: each frame
     # is analysed on its own and a rigid deck leans on the whole bent.
     mass_share: dict[str, float] = field(default_factory=dict)
+    # How many bents NAMED this frame, before any direction filtering.  A frame
+    # declared by one bent is a simply supported span; one declared by several
+    # is a continuous frame even if only one of them resists in this direction.
+    declared: int = 0
+
+    @property
+    def simple_span(self) -> bool:
+        return self.declared == 1
 
     @property
     def continuous(self) -> bool:
@@ -510,6 +524,7 @@ def frames_for(bents: list[BentStiffness], direction: str) -> list[Frame]:
             frames.append(Frame(key=key, direction=direction,
                                 members=list(acting),
                                 order=min(b.order for b in acting),
+                                declared=len(groups[key]),
                                 mass_share={b.name: 1.0 / resisting[b.name]
                                             for b in acting}))
 
@@ -611,6 +626,38 @@ def balance_checks(bents: list[BentStiffness],
                              else criteria.ref_stiffness_any),
                         note=("stiffness unavailable (unstable p-y solve?)" if bad
                               else f"{criteria.kappa_symbol} = {ki:.4g} vs {kj:.4g}"),
+                    ))
+
+        # --- stiffness across a SIMPLE SPAN, only if asked for ---
+        # Two consecutive piers that are each alone in their frame are the two
+        # supports of one simply supported span.  The span is a deck segment
+        # between joints -- a frame -- so its supports can be held to the
+        # adjacent-bent limit.  Whether they should be is a modelling choice,
+        # hence the switch.
+        if criteria.simple_span_stiffness:
+            # DECLARED by one bent -- a continuous frame that happens to have
+            # a single member in this direction (its others being released
+            # here) is not a simple span and must not be caught.
+            solo = [f for f in frames if f.simple_span and len(f.members) == 1]
+            for fi, fj in zip(solo, solo[1:]):
+                bi, bj = fi.members[0], fj.members[0]
+                for bound in range(min(fi.n_bounds, fj.n_bounds)):
+                    ki = bi.kappa(direction, bound, criteria.mass_normalized)
+                    kj = bj.kappa(direction, bound, criteria.mass_normalized)
+                    r = _ratio(ki, kj)
+                    bad = math.isnan(r)
+                    checks.append(BalanceCheck(
+                        name=STIFFNESS_CHECK, pair=(bi.name, bj.name),
+                        bound=fi.label(bound), ratio=r,
+                        limit=criteria.k_ratio_min,
+                        passed=(not bad) and r >= criteria.k_ratio_min,
+                        direction=direction,
+                        scope=f"{fi.key}–{fj.key}",
+                        ref=criteria.ref_stiffness,
+                        note=("stiffness unavailable (unstable p-y solve?)"
+                              if bad else
+                              f"simply supported span: "
+                              f"{criteria.kappa_symbol} = {ki:.4g} vs {kj:.4g}"),
                     ))
 
         # --- geometry: between adjacent frames, everywhere ---
