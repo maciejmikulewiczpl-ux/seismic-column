@@ -82,7 +82,7 @@ def test_silo_softens_and_lengthens_the_period():
 # The checks themselves
 # ---------------------------------------------------------------------------
 def _bent(name, k, m=1.0, frame="F1", order=0, m_trans=None,
-          deck_link="pinned", k_fixed=None):
+          deck_link="integral", k_fixed=None):
     """A bent with stiffness ``k`` per bound and mass ``m`` (both directions
     unless ``m_trans`` differs)."""
     return BentStiffness(name=name, frame=frame, order=order, Hcol=240.0,
@@ -1284,10 +1284,14 @@ def test_deck_link_list_must_line_up_with_the_frame_list():
 
 # --- the simple-span stiffness switch --------------------------------------
 def _simple_run():
-    """Three piers in series, each its own frame — a run of simple spans."""
-    return [_bent("P1", [100.0], m=2.0, frame="S1", order=0, deck_link="pinned"),
-            _bent("P2", [300.0], m=2.0, frame="S2", order=1, deck_link="pinned"),
-            _bent("P3", [110.0], m=2.0, frame="S3", order=2, deck_link="pinned")]
+    """Two simply supported spans in series: each span is a frame carried by
+    two piers on bearings, and the middle pier carries both."""
+    return [_bent("P1", [100.0], m=2.0, frame="S1", order=0,
+                  deck_link="pinned"),
+            _bent("P2", [300.0], m=2.0, frame="S1, S2", order=1,
+                  deck_link="bearing, pinned"),
+            _bent("P3", [110.0], m=2.0, frame="S2", order=2,
+                  deck_link="bearing")]
 
 
 def test_simple_spans_are_matched_on_period_only_by_default():
@@ -1299,11 +1303,12 @@ def test_simple_spans_are_matched_on_period_only_by_default():
 
 def test_the_switch_holds_the_two_piers_of_a_span_to_the_adjacent_limit():
     crit = BalanceCriteria(simple_span_stiffness=True)
-    checks = _long(balance_checks(_simple_run(), crit), STIFFNESS_CHECK)
+    # TRANSVERSELY the span has two supports (both shear-keyed); longitudinally
+    # it hangs off its pin alone, so there is no pair to compare there.
+    checks = [c for c in balance_checks(_simple_run(), crit)
+              if c.name == STIFFNESS_CHECK and c.direction == TRANSVERSE]
     assert [c.pair for c in checks] == [("P1", "P2"), ("P2", "P3")]
-    # k/m = 50 vs 150 vs 55 -> P1-P2 fails 0.75, P2-P3 fails, and no any-two
-    assert checks[0].ratio == pytest.approx(1 / 3)
-    assert not checks[0].passed
+    assert not checks[0].passed                   # 100 vs 300 on equal mass
     assert all(c.limit == crit.k_ratio_min for c in checks)
     assert not [c for c in balance_checks(_simple_run(), crit)
                 if c.name == STIFFNESS_ANY_CHECK]
@@ -1326,10 +1331,12 @@ def test_the_switch_ignores_a_continuous_frame_with_one_active_member():
     crit = BalanceCriteria(simple_span_stiffness=True)
     frames = {f.key: f for f in frames_for(_joint_pattern(), LONGITUDINAL)}
     assert frames["F1"].names == ("B2", "B3")     # B4 released here ...
-    assert not frames["F1"].simple_span           # ... and three declared
-    ss = [c for c in balance_checks(_joint_pattern(), crit)
-          if c.name == STIFFNESS_CHECK and "–" in c.scope]
-    assert ss == []
+    assert not frames["F1"].simply_supported      # ... but B2/B3 are integral
+    # so it is checked for stiffness with the switch either way
+    on = _long(balance_checks(_joint_pattern(), crit), STIFFNESS_CHECK)
+    off = _long(balance_checks(_joint_pattern(), BalanceCriteria()),
+                STIFFNESS_CHECK)
+    assert [c.pair for c in on] == [c.pair for c in off] != []
 
 
 def test_engineer_vocabulary_is_accepted_for_deck_links():

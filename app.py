@@ -22,14 +22,13 @@ from seismic_column.balance import (GEOMETRY_CHECK, STIFFNESS_ANY_CHECK,
                                     STIFFNESS_CHECK)
 from seismic_column.batch import (RowResult, results_to_dataframe,
                                   run_batch_balanced)
+from seismic_column.articulation import CHOICES as ARTIC_CHOICES
+from seismic_column.articulation import derive, to_table
 from seismic_column.demand import SpectrumSpec
 from seismic_column.io_schema import (
     CAP_FIXITIES,
     COLUMNS,
     COLUMN_META,
-    deck_link_word,
-    deck_links,
-    frame_keys,
     GlobalConfig,
     SOIL_COLUMN_META,
     SOIL_COLUMNS,
@@ -657,39 +656,45 @@ edited = st.data_editor(
 )
 st.session_state["batch_df"] = edited
 
-# --- how the two comma-lists above were actually read ----------------------
-with st.expander("Articulation — how the `frame` and `deck connection` cells "
-                 "were read", expanded=False):
+# --- articulation: the bearings, bent by bent ------------------------------
+with st.expander("Articulation — the bearings at each bent", expanded=False):
     st.caption(
-        "`frame` and `deck connection` are read **in pairs**: the first link "
-        "goes with the first frame, and so on. One link is used for every "
-        "frame. This is what the analysis will use — if a row here does not "
-        "say what you meant, the cell above is wrong.")
-    _art = []
-    for _, _r in edited.iterrows():
-        _keys = frame_keys(_r.get("frame", ""))
-        if not _keys:
-            _art.append({"Pier": _r.get("name", ""), "Carries": "—",
-                         "Longitudinally": "excluded from the balance checks",
-                         "Transversely": "excluded from the balance checks"})
-            continue
-        _links = deck_links(_r.get("deck_link", ""), len(_keys))
-        _lon = [k for k, ln in zip(_keys, _links)
-                if ln == "integral" or ln == "pinned"]
-        _tra = [k for k, ln in zip(_keys, _links) if ln != "free"]
-        def _share(which):
-            if not which:
-                return "— (no deck: self weight only)"
-            f = "" if len(which) == 1 else "½ each: "
-            return f + " + ".join(which)
-        _art.append({
-            "Pier": _r.get("name", ""),
-            "Carries": " · ".join(f"{deck_link_word(ln)} → {k}"
-                                  for k, ln in zip(_keys, _links)),
-            "Longitudinally": _share(_lon),
-            "Transversely": _share(_tra),
-        })
-    st.dataframe(pd.DataFrame(_art), width="stretch", hide_index=True)
+        "How each deck sits on each bent. **integral both sides** is what makes "
+        "a frame continuous — the deck runs straight through. Anything else is "
+        "a joint, so the decks either side are separate frames. Fill this in "
+        "and press Apply; it writes the `frame` and `deck connection` cells for "
+        "you. `pin` restrains longitudinally, `roller` is released "
+        "longitudinally but shear-keyed transversely, `—` means no deck that "
+        "side (the ends of the bridge).")
+    _names = [str(n) for n in edited["name"]]
+    if not _names:
+        st.info("Add some bents to the table above first.")
+    else:
+        _b, _a = to_table(_names, list(edited["frame"]),
+                          list(edited["deck_link"]))
+        _art_key = f"artic_{st.session_state['editor_version']}"
+        _grid = pd.DataFrame([_b, _a], index=["deck behind", "deck ahead"],
+                             columns=_names)
+        _opts = list(ARTIC_CHOICES)
+        _edited_art = st.data_editor(
+            _grid, key=_art_key, width="stretch",
+            column_config={n: st.column_config.SelectboxColumn(
+                n, options=_opts, required=False, width="small")
+                for n in _names})
+        _f, _l = derive(_names,
+                        [str(v) for v in _edited_art.loc["deck behind"]],
+                        [str(v) for v in _edited_art.loc["deck ahead"]])
+        _preview = pd.DataFrame({"frame": _f, "deck connection": _l},
+                                index=_names).T
+        st.caption("This is what it writes:")
+        st.dataframe(_preview, width="stretch")
+        if st.button("Apply articulation to the table above"):
+            _df = st.session_state["batch_df"].copy()
+            _df["frame"] = _f
+            _df["deck_link"] = _l
+            st.session_state["batch_df"] = _df
+            st.session_state["editor_version"] += 1
+            st.rerun()
 
 col_a, col_b = st.columns(2)
 with col_a:

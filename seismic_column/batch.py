@@ -492,6 +492,8 @@ def _plan_silos(bents: list[BentStiffness], results: dict[str, RowResult],
             for f in frames:
                 if not f.continuous:
                     continue
+                if f.simply_supported and not criteria.simple_span_stiffness:
+                    continue
                 near = {(a.name, b.name) for a, b in zip(f.members, f.members[1:])}
                 for bound in range(f.n_bounds):
                     for bi, bj in itertools.combinations(f.members, 2):
@@ -515,33 +517,6 @@ def _plan_silos(bents: list[BentStiffness], results: dict[str, RowResult],
                         moved |= soften_to(target, stiff, soft.name, bound,
                                            f"balanced stiffness ({direction})",
                                            direction)
-
-            # --- balanced stiffness across a SIMPLE SPAN, if switched on ---
-            if criteria.simple_span_stiffness:
-                solo = [f for f in frames
-                        if f.simple_span and len(f.members) == 1]
-                for fi, fj in zip(solo, solo[1:]):
-                    bi, bj = fi.members[0], fj.members[0]
-                    for bound in range(min(fi.n_bounds, fj.n_bounds)):
-                        ki = k_at(bi, silos[bi.name], bound, direction)
-                        kj = k_at(bj, silos[bj.name], bound, direction)
-                        mi = m_at(bi, silos[bi.name], direction)
-                        mj = m_at(bj, silos[bj.name], direction)
-                        if not (math.isfinite(ki) and math.isfinite(kj)):
-                            continue
-                        ai = ki / mi if criteria.mass_normalized else ki
-                        aj = kj / mj if criteria.mass_normalized else kj
-                        if min(ai, aj) <= 0 or (min(ai, aj) / max(ai, aj)
-                                                >= criteria.k_ratio_min):
-                            continue
-                        stiff, soft = (bi, bj) if ai > aj else (bj, bi)
-                        target = min(ai, aj) / criteria.k_ratio_min
-                        if criteria.mass_normalized:
-                            target *= m_at(stiff, silos[stiff.name], direction)
-                        moved |= soften_to(
-                            target, stiff, soft.name, bound,
-                            f"balanced stiffness across a simple span "
-                            f"({direction})", direction)
 
             # --- balanced frame geometry, between adjacent frames ---
             for fi, fj in zip(frames, frames[1:]):
