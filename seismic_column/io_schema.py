@@ -137,9 +137,29 @@ DIRECTIONS: tuple[str, ...] = (LONGITUDINAL, TRANSVERSE)
 NO_FRAME: frozenset[str] = frozenset({"", "-", "none", "nan", "na"})
 
 
+def frame_keys(frame: object) -> tuple[str, ...]:
+    """The frame(s) this pier belongs to, in the order entered.
+
+    A pier under an expansion joint carries the last span of one frame and the
+    first span of the next, so it genuinely belongs to BOTH.  Name them in one
+    cell -- ``"F1, F2"`` -- and it is a member of each, bringing its full
+    stiffness to both and splitting its tributary mass between them.  A single
+    name is the ordinary case and behaves exactly as it always has.
+    """
+    txt = str(frame).strip()
+    if txt.lower() in NO_FRAME:
+        return ()
+    keys = [k.strip() for k in txt.replace(";", ",").split(",")]
+    out: list[str] = []
+    for k in keys:                      # keep order, drop blanks and repeats
+        if k and k.lower() not in NO_FRAME and k not in out:
+            out.append(k)
+    return tuple(out)
+
+
 def in_frame(frame: object) -> bool:
     """True if this ``frame`` value takes part in the balance checks."""
-    return str(frame).strip().lower() not in NO_FRAME
+    return bool(frame_keys(frame))
 
 # Human-friendly labels and help text for each table column (used by the GUI).
 COLUMN_META: dict[str, tuple[str, str]] = {
@@ -148,12 +168,13 @@ COLUMN_META: dict[str, tuple[str, str]] = {
               "Groups piers for the balanced-stiffness and balanced-geometry "
               "checks. Piers sharing a frame are compared in TABLE ROW ORDER, "
               "so consecutive rows are treated as adjacent. Leave blank or "
-              "enter '-' to exclude this pier from those checks. A pier on a "
-              "'bearing' at the END of a continuous frame ALSO joins the "
-              "neighbouring frame automatically: an expansion joint means both "
-              "decks bear on the same cap, so it carries the last span of one "
-              "frame and the first span of the next. You name one frame here; "
-              "the other is derived."),
+              "enter '-' to exclude this pier from those checks. A pier under "
+              "an EXPANSION JOINT carries the last span of one frame and the "
+              "first span of the next, so it belongs to both - name them both "
+              "here, 'F1, F2'. It then joins each frame with its FULL stiffness "
+              "and HALF its tributary mass. Where you name only one, a bearing "
+              "pier between two continuous frames is shared automatically; "
+              "naming both is clearer and always wins."),
     "n_columns": ("Columns in bent",
                   "How many columns this bent carries (1 = single-column). More "
                   "than one makes the bent a PORTAL FRAME transversely: the cap "

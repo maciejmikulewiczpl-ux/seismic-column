@@ -61,7 +61,7 @@ import math
 from dataclasses import dataclass, field, replace
 
 from .geometry import Geometry
-from .io_schema import (DIRECTIONS, LONGITUDINAL, TRANSVERSE,
+from .io_schema import (DIRECTIONS, LONGITUDINAL, TRANSVERSE, frame_keys,
                         head_moment_connection, in_frame)
 
 STIFFNESS_CHECK = "Balanced stiffness (adjacent)"
@@ -131,6 +131,12 @@ class BentStiffness:
     def mass(self, direction: str) -> float:
         """Tributary mass restrained in ``direction``, kip*s^2/in."""
         return self.mass_long if direction == LONGITUDINAL else self.mass_trans
+
+    @property
+    def frames(self) -> tuple[str, ...]:
+        """Every frame this bent belongs to -- more than one when it sits under
+        an expansion joint and carries a deck either side."""
+        return frame_keys(self.frame)
 
     def participates(self, direction: str) -> bool:
         """Does this bent resist the deck in ``direction``?
@@ -467,10 +473,17 @@ def frames_for(bents: list[BentStiffness], direction: str) -> list[Frame]:
     tributary mass (the half-span belonging to that frame's deck).
     """
     groups: dict[str, list[BentStiffness]] = {}
+    declared_share: dict[str, float] = {}
     for b in sorted(bents, key=lambda b: b.order):
-        if not in_frame(b.frame):
+        keys = b.frames
+        if not keys:
             continue
-        groups.setdefault(b.frame, []).append(b)
+        # Naming two frames in the cell IS the declaration that this bent
+        # carries a deck either side of a joint: it joins both, full stiffness
+        # in each and its tributary mass divided between them.
+        declared_share[b.name] = 1.0 / len(keys)
+        for key in keys:
+            groups.setdefault(key, []).append(b)
 
     frames: list[Frame] = []
     for key in sorted(groups, key=lambda k: min(b.order for b in groups[k])):
@@ -480,7 +493,8 @@ def frames_for(bents: list[BentStiffness], direction: str) -> list[Frame]:
             frames.append(Frame(key=key, direction=direction,
                                 members=list(acting),
                                 order=min(b.order for b in acting),
-                                mass_share={b.name: 1.0 for b in acting}))
+                                mass_share={b.name: declared_share[b.name]
+                                            for b in acting}))
 
     # An expansion-joint bent sits at the END of one frame's deck and the START
     # of the next.  Give it to the neighbour too, at half its tributary mass.
@@ -522,9 +536,8 @@ def adjacent_pairs(bents: list[BentStiffness]
     """
     groups: dict[str, list[BentStiffness]] = {}
     for b in sorted(bents, key=lambda b: b.order):
-        if not in_frame(b.frame):
-            continue
-        groups.setdefault(b.frame, []).append(b)
+        for key in b.frames:
+            groups.setdefault(key, []).append(b)
     pairs = []
     for members in groups.values():
         pairs.extend(zip(members, members[1:]))
@@ -755,7 +768,7 @@ def dp_min_silo(bents: list[BentStiffness], states: dict[str, tuple[float, ...]]
     if chain is None:
         groups: dict[str, list[BentStiffness]] = {}
         for b in sorted(bents, key=lambda b: b.order):
-            groups.setdefault(b.frame, []).append(b)
+            groups.setdefault(b.frames[0] if b.frames else "", []).append(b)
         chain = list(groups.values())
 
     for members in chain:

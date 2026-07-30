@@ -1179,3 +1179,49 @@ def test_a_joint_bent_is_not_shared_into_a_simple_span_frame():
     assert frames["FA6"].M() == pytest.approx(2.0)        # untouched
     assert frames["C1"].names == ("A7", "A8")
     assert frames["C1"].M() == pytest.approx(6.0)         # A7 at FULL mass
+
+
+def test_naming_two_frames_puts_the_bent_in_both():
+    """A pier under an expansion joint carries a deck either side.  Declaring
+    'F1, F2' says so explicitly, instead of leaving it to be inferred."""
+    bents = [_bent("B2", [100.0], m=2.0, frame="F1", order=0,
+                   deck_link="integral"),
+             _bent("B3", [100.0], m=4.0, frame="F1, F2", order=1,
+                   deck_link="bearing"),
+             _bent("B4", [100.0], m=2.0, frame="F2", order=2,
+                   deck_link="integral")]
+    frames = {f.key: f for f in frames_for(bents, TRANSVERSE)}
+    assert frames["F1"].names == ("B2", "B3")
+    assert frames["F2"].names == ("B3", "B4")
+    assert frames["F1"].shared("B3") and frames["F2"].shared("B3")
+    # full stiffness in each, half the mass in each
+    assert frames["F1"].K(0) == pytest.approx(200.0)
+    assert frames["F1"].M() == pytest.approx(2.0 + 0.5 * 4.0)
+    assert frames["F2"].M() == pytest.approx(0.5 * 4.0 + 2.0)
+
+
+def test_an_explicit_pair_works_where_the_automatic_rule_declines():
+    """The automatic rule will not share into a single-bent frame, because a
+    run of simple spans is modelled one frame per bent.  Naming both frames
+    overrides that -- it is a statement about the articulation."""
+    def build(last_frame):
+        return [_bent("B21", [100.0], m=2.0, frame="F9", order=0,
+                      deck_link="integral"),
+                _bent("B22", [100.0], m=4.0, frame=last_frame, order=1,
+                      deck_link="bearing"),
+                _bent("B23", [100.0], m=2.0, frame="F10", order=2,
+                      deck_link="pinned")]
+    auto = {f.key: f for f in frames_for(build("F9"), TRANSVERSE)}
+    assert auto["F10"].names == ("B23",)              # declined, as designed
+    told = {f.key: f for f in frames_for(build("F9, F10"), TRANSVERSE)}
+    assert told["F10"].names == ("B22", "B23")
+    assert told["F10"].M() == pytest.approx(0.5 * 4.0 + 2.0)
+
+
+def test_a_blank_or_dashed_entry_in_a_list_is_ignored():
+    from seismic_column.io_schema import frame_keys
+    assert frame_keys("F1, F2") == ("F1", "F2")
+    assert frame_keys(" F9 ; F10 ") == ("F9", "F10")
+    assert frame_keys("F1,F1") == ("F1",)             # a repeat is not a share
+    assert frame_keys("F2, -") == ("F2",)
+    assert frame_keys("-") == () and frame_keys("") == ()
