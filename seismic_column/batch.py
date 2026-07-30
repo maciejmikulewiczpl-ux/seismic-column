@@ -619,6 +619,7 @@ def _frame_basis(results: list[RowResult], order: dict[str, int],
     """
     bents = _build_bents(results, order, cfg)
     out: dict[str, tuple[dict, dict]] = {}
+    _softness: dict[tuple[str, str], float] = {}
     for direction in DIRECTIONS:
         for f in frames_for(bents, direction):
             n = f.n_bounds
@@ -630,8 +631,17 @@ def _frame_basis(results: list[RowResult], order: dict[str, int],
             # extra bounds on their stand-alone demand.
             lbls = f.members[0].bound_labels
             basis = {lbls[i]: (f.K(i), f.M() * G_IN_S2) for i in range(n)}
+            # A boundary bent belongs to two frames.  Take the one that governs
+            # it -- the LONGER period, since displacement capacity is what these
+            # bents fail on and spectral displacement grows with T.  (Shear is
+            # capacity-based, Vo = n*Mo/H_free, so it does not enter here.)
+            soft = f.M() / f.K(0) if f.K(0) > 0 else float("inf")
             for b in f.members:
                 d_basis, d_fix = out.setdefault(b.name, ({}, {}))
+                if direction in d_basis and soft <= _softness.get(
+                        (b.name, direction), -1.0):
+                    continue
+                _softness[(b.name, direction)] = soft
                 d_basis[direction] = basis
                 d_fix[direction] = b.end_fixity(direction)
     return out

@@ -297,4 +297,8 @@ def test_geometry_checks_pair_frames_and_orphan_nobody():
         assert linked <= keys                    # every pair resolves to a frame
         assert {f.key for f in frames} == linked  # and no frame is left out
         covered = {n for f in frames for n in f.names}
-        assert covered == {b.name for b in bents}
+        # A bearing is released longitudinally, so it carries no deck and is
+        # deliberately NOT a frame there.  Everything else must be covered.
+        expected = {b.name for b in bents
+                    if direction == TRANSVERSE or b.deck_link != "bearing"}
+        assert covered == expected

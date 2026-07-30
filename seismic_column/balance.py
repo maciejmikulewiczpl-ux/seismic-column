@@ -217,6 +217,11 @@ class Frame:
     direction: str
     members: list[BentStiffness]
     order: int                       # position along the bridge (lowest member)
+    # Fraction of each member's tributary mass credited to THIS frame.  A bent
+    # under an expansion joint carries a half-span from either side, so it
+    # appears in BOTH frames at 0.5.  Its STIFFNESS is full in both: each frame
+    # is analysed on its own and a rigid deck leans on the whole bent.
+    mass_share: dict[str, float] = field(default_factory=dict)
 
     @property
     def continuous(self) -> bool:
@@ -247,8 +252,17 @@ class Frame:
         return " / ".join(sorted(kinds))
 
     def M(self) -> float:
-        """Frame tributary mass in this direction, kip*s^2/in."""
-        return sum(b.mass(self.direction) for b in self.members)
+        """Frame tributary mass in this direction, kip*s^2/in.
+
+        A boundary bent enters at its ``mass_share`` — the part of its tributary
+        that belongs to THIS frame's deck.
+        """
+        return sum(b.mass(self.direction) * self.mass_share.get(b.name, 1.0)
+                   for b in self.members)
+
+    def shared(self, name: str) -> bool:
+        """True when ``name`` is a boundary bent carrying two decks."""
+        return self.mass_share.get(name, 1.0) < 1.0
 
     def T(self, bound: int) -> float:
         """Frame period, s.  Reduces to the bent's own period when alone."""
@@ -437,6 +451,20 @@ def frames_for(bents: list[BentStiffness], direction: str) -> list[Frame]:
 
     A bent with no mass in this direction drops out entirely, as does one opted
     out of the checks via a blank ``frame``.
+
+    **A released bearing leaves the model in that direction.** It carries no
+    deck there — the superstructure slides on it — so all it holds is its own
+    cap and column self weight. It is not a frame, and pairing that self weight
+    against a real frame's period is meaningless, so it takes no part in the
+    balance checks longitudinally. Its own seismic checks are unaffected and
+    still run on its own stand-alone period.
+
+    **A boundary bent belongs to BOTH frames it carries.** An expansion joint
+    over a bent means the deck each side bears on the same cap, so the bent
+    supports the last span of one frame and the first span of the next. It
+    therefore appears in both, bringing its FULL stiffness to each (each frame
+    is analysed alone, and a rigid deck leans on the whole bent) and HALF its
+    tributary mass (the half-span belonging to that frame's deck).
     """
     groups: dict[str, list[BentStiffness]] = {}
     for b in sorted(bents, key=lambda b: b.order):
@@ -445,20 +473,41 @@ def frames_for(bents: list[BentStiffness], direction: str) -> list[Frame]:
         groups.setdefault(b.frame, []).append(b)
 
     frames: list[Frame] = []
-    for key, members in groups.items():
-        holds = [b for b in members if b.mass(direction) > 0]
-        acting = [b for b in holds if b.participates(direction)]
-        # A bearing released in THIS direction still holds whatever span it is
-        # fixed to, so it stands alone.  A `free` bent resists nothing at all
-        # and leaves the model entirely.
-        standalone = [b for b in holds
-                      if not b.participates(direction) and b.deck_link != "free"]
+    for key in sorted(groups, key=lambda k: min(b.order for b in groups[k])):
+        acting = [b for b in groups[key]
+                  if b.mass(direction) > 0 and b.participates(direction)]
         if acting:
-            frames.append(Frame(key=key, direction=direction, members=acting,
-                                order=min(b.order for b in acting)))
-        for b in standalone:
-            frames.append(Frame(key=f"{key}·{b.name}", direction=direction,
-                                members=[b], order=b.order))
+            frames.append(Frame(key=key, direction=direction,
+                                members=list(acting),
+                                order=min(b.order for b in acting),
+                                mass_share={b.name: 1.0 for b in acting}))
+
+    # An expansion-joint bent sits at the END of one frame's deck and the START
+    # of the next.  Give it to the neighbour too, at half its tributary mass.
+    #
+    # Only between CONTINUOUS frames.  A run of simple spans is modelled as one
+    # frame per bent, where the bent's own tributary already IS the frame mass
+    # -- the half-span each side is counted once, in the bent it belongs to.
+    # Sharing a joint bent into such a frame would count the span beyond the
+    # joint a second time, which is not what an expansion joint does.
+    declared = {f.key: len(f.members) for f in frames}
+    for i, f in enumerate(frames):
+        if declared[f.key] < 2:
+            continue
+        edges = ((f.members[0], frames[i - 1] if i else None),
+                 (f.members[-1], frames[i + 1] if i + 1 < len(frames) else None))
+        for edge, nb in edges:
+            if nb is None or edge.deck_link != "bearing":
+                continue
+            if declared[nb.key] < 2:
+                continue
+            if any(m.name == edge.name for m in nb.members):
+                continue
+            nb.members.append(edge)
+            nb.members.sort(key=lambda b: b.order)
+            nb.mass_share[edge.name] = 0.5
+            f.mass_share[edge.name] = 0.5
+
     frames.sort(key=lambda f: f.order)
     return frames
 

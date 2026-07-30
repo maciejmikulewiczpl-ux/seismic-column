@@ -161,12 +161,13 @@ def _en_pattern():
 
 
 def test_frames_differ_by_direction():
-    """A bearing released longitudinally but shear-keyed joins the continuous
-    frame transversely, and stands alone longitudinally."""
+    """A bearing shear-keyed transversely joins the continuous frame there, and
+    LEAVES the model longitudinally -- released, it carries no deck that way,
+    only its own cap and column self weight, so it is not a frame at all."""
     bents = _en_pattern()
     lon = [f.names for f in frames_for(bents, LONGITUDINAL)]
     tra = [f.names for f in frames_for(bents, TRANSVERSE)]
-    assert lon == [("A6",), ("A7",), ("A8", "A9", "A10"), ("A11",), ("A12",)]
+    assert lon == [("A6",), ("A8", "A9", "A10"), ("A12",)]
     assert tra == [("A6",), ("A7", "A8", "A9", "A10", "A11"), ("A12",)]
     # ordered along the bridge either way
     assert [f.order for f in frames_for(bents, LONGITUDINAL)] == sorted(
@@ -1117,3 +1118,62 @@ def test_the_silo_predictor_reproduces_the_real_bent_stiffness(monkeypatch):
     assert got == pytest.approx(bent.stiffness(LONGITUDINAL, 0))
     # and a target in those units converts back to what required_silo bisects on
     assert to_raw(bent, got) == pytest.approx(4.0)
+
+
+# --- a bent under an expansion joint carries TWO decks ---------------------
+def _joint_pattern():
+    """Two continuous frames meeting at a bearing bent, as on structure B:
+    F1 = B2 B3 [B4], F2 = [B4] B5 B6."""
+    return [_bent("B2", [100.0], m=2.0, frame="F1", order=0,
+                  deck_link="integral"),
+            _bent("B3", [100.0], m=2.0, frame="F1", order=1,
+                  deck_link="integral"),
+            _bent("B4", [100.0], m=4.0, frame="F2", order=2,
+                  deck_link="bearing"),
+            _bent("B5", [100.0], m=2.0, frame="F2", order=3,
+                  deck_link="integral"),
+            _bent("B6", [100.0], m=2.0, frame="F2", order=4,
+                  deck_link="integral")]
+
+
+def test_a_joint_bent_belongs_to_both_frames_it_carries():
+    frames = {f.key: f for f in frames_for(_joint_pattern(), TRANSVERSE)}
+    assert frames["F1"].names == ("B2", "B3", "B4")
+    assert frames["F2"].names == ("B4", "B5", "B6")
+    assert frames["F1"].shared("B4") and frames["F2"].shared("B4")
+    assert not frames["F1"].shared("B2")
+
+
+def test_the_joint_bent_brings_full_stiffness_but_half_its_mass():
+    """Each frame is analysed alone and a rigid deck leans on the WHOLE bent,
+    so k is full in both; the mass is the half-span belonging to that deck."""
+    frames = {f.key: f for f in frames_for(_joint_pattern(), TRANSVERSE)}
+    assert frames["F1"].K(0) == pytest.approx(300.0)      # 100+100+100, B4 full
+    assert frames["F1"].M() == pytest.approx(2.0 + 2.0 + 0.5 * 4.0)
+    assert frames["F2"].K(0) == pytest.approx(300.0)
+    assert frames["F2"].M() == pytest.approx(0.5 * 4.0 + 2.0 + 2.0)
+
+
+def test_a_released_bearing_is_not_a_longitudinal_frame_at_all():
+    """It carries no deck longitudinally -- only its own cap and column self
+    weight -- so pairing it against a real frame's period is meaningless."""
+    lon = [f.names for f in frames_for(_joint_pattern(), LONGITUDINAL)]
+    assert lon == [("B2", "B3"), ("B5", "B6")]
+    assert not any("B4" in names for names in lon)
+
+
+def test_a_joint_bent_is_not_shared_into_a_simple_span_frame():
+    """A run of simple spans is one frame per bent, and that bent's tributary
+    already IS the frame mass.  Sharing in would count the span beyond the
+    joint twice."""
+    bents = [_bent("A6", [100.0], m=2.0, frame="FA6", order=0,
+                   deck_link="pinned"),
+             _bent("A7", [100.0], m=4.0, frame="C1", order=1,
+                   deck_link="bearing"),
+             _bent("A8", [100.0], m=2.0, frame="C1", order=2,
+                   deck_link="integral")]
+    frames = {f.key: f for f in frames_for(bents, TRANSVERSE)}
+    assert frames["FA6"].names == ("A6",)
+    assert frames["FA6"].M() == pytest.approx(2.0)        # untouched
+    assert frames["C1"].names == ("A7", "A8")
+    assert frames["C1"].M() == pytest.approx(6.0)         # A7 at FULL mass
