@@ -460,6 +460,52 @@ def column_report(rr: RowResult, view: str = "envelope") -> str:
                 f"| {g.demand.disp_demand:.2f} | **{r:.2f}** "
                 f"| {'NET TENSION ⚠' if p.net_tension else ''} |")
         add("")
+        if _moment:
+            _n = bent.n_columns
+            _s = bent.spacing
+            _xmax = max(abs(p.x) for p in bent.positions)
+            _sx2 = sum(p.x ** 2 for p in bent.positions)
+            _Mo = bent.M_overturn / _n
+            _wind = bent.positions[0]
+            _P_dead = _wind.axial - _wind.delta_P
+            add("**Why the couple does not care how long the column is.** Cut "
+                "at the top of shaft and take moments; each column separately "
+                "gives `Vᵢ·H_free = M_topᵢ + M_baseᵢ`, so the two combine to")
+            add("")
+            add("```")
+            add("Σ ΔP·x = V·H_free − Σ M_base = Σ M_top")
+            add("```")
+            add("")
+            add("The couple **is** the sum of the column top moments — nothing "
+                "else. Elastically `M_top = V·(H_free − a)` and it grows as the "
+                "base softens, because a deeper point of fixity drops the "
+                "contraflexure point `a`: a rigid base gives `V·H_free/2`, a "
+                "fully flexible one `V·H_free`, so up to twice the couple. But "
+                "`M_top` cannot exceed `Mo`. Once the head hinges it saturates, "
+                "and `H_free` drops out entirely — which is why the value below "
+                "is length-independent.")
+            add("")
+            _eq(add, f"Extreme-column couple (n = {_n}, evenly spaced)",
+                "ΔP = n·Mo·x_max / Σxⱼ²",
+                f"{_n} · {_Mo/12:.0f} · {_xmax/12:.1f} / {_sx2/144:.0f}",
+                f"{bent.delta_P:.0f} kip",
+                ref=f"= {2.0 if _n == 2 else _n * _xmax / _sx2 * _s:.2f}·Mo/s "
+                    f"for this layout — only Mo and the SPACING move it")
+            if _P_dead > 0:
+                _s_req = (_n * _Mo * _xmax / _sx2) * _s / _P_dead
+                if _s_req > _s:
+                    add(f"- Windward column is in **net tension** "
+                        f"({_wind.axial:+.0f} kip on {_P_dead:.0f} kip dead "
+                        f"load). Keeping it in compression needs "
+                        f"**{_s_req/12:.1f} ft** spacing — "
+                        f"**{(_s_req - _s)/12:.1f} ft more** than the "
+                        f"{_s/12:.1f} ft used — or a proportionally lower `Mo`. "
+                        f"Lengthening the column does **not** help.")
+                else:
+                    add(f"- Windward column stays in compression "
+                        f"({_wind.axial:+.0f} kip); tension would start below "
+                        f"**{_s_req/12:.1f} ft** spacing.")
+            add("")
         _envelope = (f"The checks below are the **envelope** over the positions "
                      f"(transverse) and the dead-load run (longitudinal); "
                      f"**{bent.governing.label}** governs the displacement "

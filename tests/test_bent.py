@@ -370,3 +370,29 @@ def test_a_pinned_transverse_bent_still_reports_its_shear_and_overturning():
     assert b.V_bent == pytest.approx(3 * one.directions[TRANSVERSE].Vo)
     # statics: with one hinge per column, V*H_free = sum(Mo)
     assert b.V_bent * one.H_free == pytest.approx(b.M_overturn, rel=1e-6)
+
+
+@pytest.mark.parametrize("Hcol_ft", [14.0, 22.0, 34.0, 50.0])
+def test_the_mechanism_couple_does_not_depend_on_column_length(Hcol_ft):
+    """sum(dP*x) = sum(M_top), and at the mechanism M_top = Mo whatever the
+    column length.  Elastically the couple DOES grow as the base softens
+    (contraflexure drops), but it saturates here -- so a deeper base is not a
+    reason to expect more push/pull once the head has hinged."""
+    b = evaluate_bent(2, 26 * 12.0, 2 * 980.0, cap_fixity="fixed",
+                      **_kw(geometry=Geometry(Hcol=Hcol_ft * 12.0, D_shaft=84)))
+    sum_Mo = sum(p.assessment.Mo for p in b.positions)
+    sum_dPx = sum(p.delta_P * p.x for p in b.positions)
+    assert sum_dPx == pytest.approx(sum_Mo, rel=2e-3)
+    # the closed form the report quotes: dP = n*Mo*x_max/sum(x^2)
+    xmax = max(abs(p.x) for p in b.positions)
+    sx2 = sum(p.x ** 2 for p in b.positions)
+    assert b.delta_P == pytest.approx(sum_Mo * xmax / sx2, rel=2e-3)
+
+
+def test_wider_spacing_is_the_lever_on_the_couple():
+    """dP = n*Mo*x_max/sum(x^2) scales as 1/s, so doubling the spacing halves
+    the couple -- lengthening the column does nothing."""
+    near = evaluate_bent(2, 20 * 12.0, 2 * 980.0, cap_fixity="fixed", **_kw())
+    far = evaluate_bent(2, 40 * 12.0, 2 * 980.0, cap_fixity="fixed", **_kw())
+    assert far.delta_P < near.delta_P
+    assert far.delta_P == pytest.approx(near.delta_P / 2.0, rel=0.05)
