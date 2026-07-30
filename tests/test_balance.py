@@ -748,6 +748,9 @@ def test_stiffness_stays_inside_a_frame_but_geometry_crosses_it():
     boundary, but the frame-period rule is explicitly a BETWEEN-frames rule."""
     df = default_dataframe(4)
     df["frame"] = ["A", "A", "B", "B"]
+    # CONTINUOUS frames: two bents on bearings would be a simply supported
+    # span, which is matched on period alone unless the switch says otherwise
+    df["deck_link"] = "integral"
     out = run_batch_balanced(df, _cfg(optimize=False, balance_auto_silo=False))
     stiff = {c.pair for c in out.balance.checks
              if c.name in (STIFFNESS_CHECK, STIFFNESS_ANY_CHECK)}
