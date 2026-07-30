@@ -827,10 +827,38 @@ def _balance_stage(results: list[RowResult], rows_by_name: dict[str, pd.Series],
                        f"{best[0] / 12:g} ft of silo.")
         result.converged = True
 
+    # The search has now done everything it can.  A BETWEEN-FRAME geometry pair
+    # still short at this point is not a design failure to be beaten out with a
+    # deeper silo -- the balance rules exist to let a bridge AVOID a more
+    # rigorous analysis, and where they cannot be met the code's own route is
+    # nonlinear time-history (SDC 7.1.3 / SGS 4.1.3).  So it is referred there.
+    #
+    # WITHIN-FRAME stiffness is deliberately NOT referred: that rule governs how
+    # the frame distributes demand between its own members, and a time-history
+    # run does not excuse it.
+    unresolved_geo = [c for c in result.checks
+                      if not c.passed and c.name == GEOMETRY_CHECK]
+    if unresolved_geo:
+        for c in unresolved_geo:
+            c.tha_required = True
+        pairs = sorted({f"{c.pair[0]}–{c.pair[1]}" for c in unresolved_geo})
+        log.append(
+            f"TIME-HISTORY REQUIRED — balanced frame geometry could not be met "
+            f"by practical means at {len(unresolved_geo)} pair(s) "
+            f"({', '.join(pairs)}). The silo search pursued it and stopped; "
+            f"closing it further would need silo depths or diameter changes "
+            f"beyond what the search could reach. Per SDC 7.1.3 / SGS 4.1.3 "
+            f"this is cleared by nonlinear time-history analysis, not by "
+            f"forcing the ratio. The WITHIN-frame stiffness rules are still "
+            f"enforced and are reported separately.")
+
     if not result.passed:
         for c in result.failed:
             log.append(f"UNRESOLVED — {c.label}: ratio {c.ratio:.3f} "
                        f"< {c.limit:.2f} ({c.note})")
+    for c in result.needs_tha:
+        log.append(f"THA — {c.label}: ratio {c.ratio:.3f} < {c.limit:.2f} "
+                   f"({c.note})")
     return result
 
 

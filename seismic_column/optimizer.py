@@ -35,8 +35,15 @@ from .sdc_capacity import (
 # ---------------------------------------------------------------------------
 # Design representation
 # ---------------------------------------------------------------------------
-PARAMETERS = ("longitudinal", "confinement", "diameter", "fc")
+PARAMETERS = ("longitudinal", "confinement", "diameter", "fc",
+              "shaft_diameter")
 DEFAULT_PRIORITY = ("longitudinal", "confinement", "diameter", "fc")
+# What the optimiser may change unless told otherwise.  ``shaft_diameter`` is
+# deliberately NOT in it: an entered shaft is an input to respect.  Add it to
+# let the optimiser re-derive the shaft from the column, which is what it did
+# unconditionally before -- and which silently discarded a deliberate shaft
+# enlargement, returning a different bridge under the caller's chosen name.
+DEFAULT_VARIABLE = ("longitudinal", "confinement", "diameter", "fc")
 
 # Checks fixed by MORE confinement that only get WORSE with more longitudinal
 # steel (the required min transverse ratio rises with steel; the column shear
@@ -94,7 +101,7 @@ class ColumnDesign:
 class OptimizeSpec:
     """Which parameters may vary, the priority order and the search ladders."""
 
-    variable: set[str] = field(default_factory=lambda: set(PARAMETERS))
+    variable: set[str] = field(default_factory=lambda: set(DEFAULT_VARIABLE))
     priority: tuple[str, ...] = DEFAULT_PRIORITY
     # longitudinal ladder
     bar_numbers: tuple[int, ...] = (8, 9, 10, 11, 14)
@@ -474,14 +481,31 @@ def optimize_column(
     design = replace(start)
     log: list[str] = []
     state = {"iters": 0, "shaft": replace(shaft_start)}
-    # the shaft ALWAYS tracks the column by this oversize (Type II); the entered
-    # shaft is only a starting value.  The code minimum is a hard floor, the
-    # user's value can be more.
     min_oversize = max(spec.min_shaft_oversize, provisions.min_shaft_oversize)
+    # Is the optimiser allowed to CHOOSE the shaft diameter?  ``variable`` is the
+    # declaration of what it may change, and the shaft belongs in it like
+    # anything else.  Without it the entered D_shaft is an input to respect, not
+    # a starting value to discard -- a shaft enlargement is a deliberate design
+    # move, and silently re-deriving it from the column throws that move away
+    # and returns a different bridge under the caller's chosen name.
+    shaft_is_variable = "shaft_diameter" in spec.variable
 
     def assess(d: ColumnDesign) -> ColumnAssessment:
-        # derive the shaft diameter from the column + oversize (tracks up & down)
-        shaft_D = required_shaft_diameter(d.D, min_oversize, spec.shaft_diameters)
+        if shaft_is_variable:
+            # track the column up and down by the oversize
+            shaft_D = required_shaft_diameter(d.D, min_oversize,
+                                              spec.shaft_diameters)
+        else:
+            # hold what was entered, but never below the Type II minimum
+            shaft_D = max(shaft_start.D,
+                          required_shaft_diameter(d.D, min_oversize,
+                                                  spec.shaft_diameters))
+            if shaft_D > shaft_start.D and not state.get("_oversize_logged"):
+                state["_oversize_logged"] = True
+                state.setdefault("notes", []).append(
+                    f"Shaft raised {shaft_start.D:.0f} -> {shaft_D:.0f} in: the "
+                    f"entered diameter is below the {min_oversize:.0f} in Type "
+                    f"II oversize for a {d.D:.0f} in column.")
         geom_d = (geometry if shaft_D == geometry.D_shaft
                   else replace(geometry, D_shaft=shaft_D))
         ctx_d = ctx if geom_d is geometry else replace(ctx, geometry=geom_d)

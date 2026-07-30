@@ -212,3 +212,51 @@ def test_fixed_diameter_result_is_independent_of_entered_reinforcement():
             heavy.spiral_spacing, heavy.fc) == \
            (light.n_bars, light.long_bar_no, light.spiral_bar_no,
             light.spiral_spacing, light.fc)
+
+
+def test_an_entered_shaft_is_held_unless_declared_variable():
+    """A shaft enlargement is a deliberate design move, not a starting value.
+
+    Re-deriving it from the column silently returns a different bridge under
+    the caller's chosen name, which is exactly how three "shaft enlargement"
+    results once turned out to be the baseline in disguise.
+    """
+    df = default_dataframe(1)
+    df.loc[0, "Dcol_in"] = 48.0
+    df.loc[0, "D_shaft_in"] = 132.0          # far above column + oversize
+    held = _run(df, variable=("longitudinal", "confinement"))
+    assert held.shaft.D == pytest.approx(132.0)
+    varied = _run(df, variable=("longitudinal", "confinement", "shaft_diameter"))
+    assert varied.shaft.D < 132.0            # re-derived from the column
+
+
+def test_an_undersized_shaft_is_rejected_before_the_optimiser_sees_it():
+    """Holding an entered shaft must not let an illegal one through.
+
+    validate() catches this earlier and more usefully than the optimiser could,
+    naming the pier and both diameters, so an undersized shaft never reaches
+    the sizing code at all.
+    """
+    from seismic_column.io_schema import validate
+    df = default_dataframe(1)
+    df.loc[0, "Dcol_in"] = 72.0
+    df.loc[0, "D_shaft_in"] = 78.0           # only 6 in oversize, below the 24
+    with pytest.raises(ValueError, match="at least 24 in larger"):
+        validate(df, min_shaft_oversize=24.0)
+
+
+def test_the_optimiser_still_floors_a_held_shaft_at_the_type_II_minimum():
+    """Belt and braces for a direct caller that bypasses validate()."""
+    from seismic_column.demand import DesignSpectrum
+    from seismic_column.geometry import Geometry
+    from seismic_column.optimizer import (ColumnDesign, OptimizeSpec,
+                                          optimize_column)
+    col = ColumnDesign(D=72.0, fc=4.0, cover=2.0, n_bars=30, long_bar_no=11,
+                       spiral_bar_no=6, spiral_spacing=3.0)
+    shaft = ColumnDesign(D=78.0, fc=4.0, cover=3.0, n_bars=30, long_bar_no=11,
+                         spiral_bar_no=6, spiral_spacing=3.5)
+    res = optimize_column(
+        col, shaft, Geometry(Hcol=20 * 12, D_shaft=78.0),
+        DesignSpectrum(Sds=1.0, Sd1=0.6), axial=1200.0, weight=1200.0,
+        spec=OptimizeSpec(variable={"longitudinal", "confinement"}))
+    assert res.shaft.D >= 72.0 + 24.0

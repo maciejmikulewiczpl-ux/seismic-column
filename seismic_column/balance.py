@@ -261,6 +261,19 @@ class BalanceCheck:
     scope: str = ""                  # frame key the check belongs to
     ref: str = ""
     note: str = ""
+    # Set only on a BETWEEN-FRAME geometry check that the silo search pursued
+    # and could not close by practical means.  The balance rules exist to let a
+    # bridge AVOID a more rigorous analysis (SDC 7.1.3 / SGS 4.1.3); where they
+    # cannot be met, the code's own route is nonlinear time-history, not an
+    # unbuildable silo.  A WITHIN-frame stiffness shortfall never gets this --
+    # that rule governs how the frame itself behaves and has to be satisfied.
+    tha_required: bool = False
+
+    @property
+    def status(self) -> str:
+        if self.passed:
+            return "OK"
+        return "THA" if self.tha_required else "NG"
 
     @property
     def label(self) -> str:
@@ -281,11 +294,24 @@ class BalanceResult:
 
     @property
     def passed(self) -> bool:
-        return all(c.passed for c in self.checks)
+        """No HARD failure left.
+
+        A geometry shortfall the search pursued and could not close by
+        practical means is not counted here — it is referred to time-history
+        analysis instead, which is the code's own route.  It is still reported,
+        prominently, via :attr:`needs_tha`.
+        """
+        return all(c.passed or c.tha_required for c in self.checks)
 
     @property
     def failed(self) -> list[BalanceCheck]:
-        return [c for c in self.checks if not c.passed]
+        """Hard failures only — the ones that must be designed out."""
+        return [c for c in self.checks if not (c.passed or c.tha_required)]
+
+    @property
+    def needs_tha(self) -> list[BalanceCheck]:
+        """Geometry pairs referred to time-history analysis."""
+        return [c for c in self.checks if c.tha_required]
 
     def worst_ratio(self, name: str, check_name: str,
                     direction: str | None = None) -> float | None:

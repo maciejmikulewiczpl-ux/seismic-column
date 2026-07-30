@@ -35,7 +35,13 @@ CODES = ["SDC 2.1", "AASHTO SGS 3rd Ed."]
 
 # the balance stages re-run whole rows, so keep the (slow) column-diameter
 # search out of it unless a test is specifically about diameter.
-FAST = ("longitudinal", "confinement", "fc")
+# These tests were written when the optimiser ALWAYS re-derived the shaft from
+# the column.  It now holds an entered shaft unless told otherwise, so declare
+# it variable here to keep exercising what these tests are about -- the balance
+# rules and the silo search -- rather than foundation sizing.  (The default
+# table pairs a 48 in column with an 84 in shaft, and in multiplier mode a
+# bigger shaft means a DEEPER assumed fixity, hence a softer member.)
+FAST = ("longitudinal", "confinement", "fc", "shaft_diameter")
 
 
 def _cfg(**kw):
@@ -469,18 +475,28 @@ def test_silo_actually_lengthens_the_analysed_column():
 @pytest.mark.parametrize("strategy", ["greedy", "min_silo"])
 def test_silo_cap_reports_instead_of_looping(strategy):
     """Whichever strategy is driving, a binding cap must be reported with the
-    cap value and what to do about it — never an infinite loop or a bare FAIL."""
+    cap value and what to do about it — never an infinite loop or a bare FAIL.
+
+    These are simply supported bents, so the only rule in play is BETWEEN-frame
+    geometry.  Pursued to the cap and still short, that is exactly the case the
+    codes send to time-history rather than to a deeper silo, so it is referred
+    there — reported prominently, but not counted as a hard failure.
+    """
     df = default_dataframe(3)
     df.loc[0, "Hcol_ft"] = 12.0
     df.loc[2, "Hcol_ft"] = 40.0
     out = run_batch_balanced(df, _cfg(balance_auto_silo=True, max_silo_ft=1.0,
                                       balance_strategy=strategy))
-    assert not out.balance.passed
-    assert not out.balance.converged
-    log = "\n".join(out.balance.log)
+    bal = out.balance
+    assert not bal.converged                  # the search genuinely gave up
+    assert bal.needs_tha                      # ... and said so
+    assert all(c.name == GEOMETRY_CHECK for c in bal.needs_tha)
+    assert all(c.status == "THA" for c in bal.needs_tha)
+    assert not bal.failed                     # no HARD failure remains
+    log = "\n".join(bal.log)
     assert "cap" in log                       # names the binding constraint
     assert "raise the cap" in log             # and what to do about it
-    assert "UNRESOLVED" in log
+    assert "TIME-HISTORY REQUIRED" in log
     assert all(r.silo <= 1.0 * 12.0 + 1e-9 for r in out.results)
 
 
@@ -935,3 +951,42 @@ def test_frame_K_uses_each_members_end_condition():
     assert tra.K(0) == pytest.approx(200.0)     # both fixed-free
     assert "fixed-fixed" in lon.end_conditions
     assert lon.end_conditions != tra.end_conditions
+
+
+# --- referring an impractical geometry pair to time-history ----------------
+def _chk(name, ratio, passed, tha=False):
+    from seismic_column.balance import BalanceCheck
+    return BalanceCheck(name=name, pair=("A", "B"), bound="best", ratio=ratio,
+                        limit=0.75, passed=passed, tha_required=tha)
+
+
+def test_a_tha_referral_is_not_a_hard_failure_but_is_still_reported():
+    from seismic_column.balance import (BalanceResult, GEOMETRY_CHECK,
+                                        STIFFNESS_CHECK)
+    r = BalanceResult(checks=[
+        _chk(STIFFNESS_CHECK, 0.90, True),
+        _chk(GEOMETRY_CHECK, 0.48, False, tha=True),
+    ])
+    assert r.passed                      # no HARD failure left
+    assert r.failed == []
+    assert len(r.needs_tha) == 1
+    assert r.needs_tha[0].status == "THA"
+
+
+def test_a_within_frame_stiffness_shortfall_stays_a_hard_failure():
+    """Time-history does not excuse how a frame distributes its own demand."""
+    from seismic_column.balance import (BalanceResult, GEOMETRY_CHECK,
+                                        STIFFNESS_CHECK)
+    r = BalanceResult(checks=[
+        _chk(STIFFNESS_CHECK, 0.60, False),
+        _chk(GEOMETRY_CHECK, 0.48, False, tha=True),
+    ])
+    assert not r.passed
+    assert [c.name for c in r.failed] == [STIFFNESS_CHECK]
+
+
+def test_status_distinguishes_the_three_outcomes():
+    from seismic_column.balance import GEOMETRY_CHECK, STIFFNESS_CHECK
+    assert _chk(STIFFNESS_CHECK, 0.9, True).status == "OK"
+    assert _chk(STIFFNESS_CHECK, 0.6, False).status == "NG"
+    assert _chk(GEOMETRY_CHECK, 0.6, False, tha=True).status == "THA"
