@@ -1045,3 +1045,39 @@ def test_a_short_stiff_pier_gets_a_silo_for_its_own_shear():
                    if c.name == "Column shear"), None)
         if ck is not None and ck.capacity > 0:
             assert ck.demand / ck.capacity <= 1.02, (rr.name, rr.silo / 12)
+
+
+def test_the_shear_silo_stage_re_runs_a_pier_on_its_FRAME_basis(monkeypatch):
+    """Regression: this stage runs AFTER the frame stage, so if it re-runs a
+    pier bare it silently reverts it to a stand-alone cantilever on its own
+    period -- throwing away the end condition and demand the frame stage just
+    established, and changing the very shear it is sizing for."""
+    from seismic_column import batch as B
+
+    def _row(dc):
+        class _Ck:
+            name, demand, capacity = "Column shear", 900.0 * dc, 900.0
+        class _A:
+            H_free = 240.0
+            checks = [_Ck()]
+        class _R:
+            name = "P1"
+            silo = 0.0
+            assessment = _A()
+        return _R()
+
+    basis, ef = ("K/W sentinel",), {"longitudinal": "fixed"}
+    monkeypatch.setattr(B, "_frame_basis", lambda *a, **k: {"P1": (basis, ef)})
+    seen = []
+
+    def _spy(row, cfg, **kw):
+        seen.append(kw)
+        return _row(0.5)                      # passes, so the loop stops
+
+    monkeypatch.setattr(B, "run_row", _spy)
+    floors, _log = B._shear_silo_floors([_row(2.0)], {"P1": None}, {}, None)
+
+    assert floors["P1"] > 0.0                 # it did size a silo
+    assert len(seen) == 1
+    assert seen[0]["demand_basis"] is basis
+    assert seen[0]["end_fixity"] is ef

@@ -760,9 +760,17 @@ def _shear_silo_floors(results: list[RowResult], rows_by_name: dict,
                 continue
             floors[rr.name] = need[rr.name]
             try:
+                # Keep the FRAME basis on the re-run.  Without it this stage
+                # silently reverts the pier to a stand-alone cantilever on its
+                # own period -- undoing the end condition and demand the frame
+                # stage just established, and changing the very shear it is
+                # trying to size for.
+                nb = _frame_basis(results, order, cfg).get(rr.name)
                 results[i] = run_row(rows_by_name[rr.name], cfg,
                                      on_candidate=on_candidate,
-                                     silo=floors[rr.name])
+                                     silo=floors[rr.name],
+                                     demand_basis=nb[0] if nb else None,
+                                     end_fixity=nb[1] if nb else None)
             except Exception as exc:
                 log.append(f"{rr.name}: could not re-analyse at a "
                            f"{floors[rr.name]/12:.1f} ft silo ({exc}).")
