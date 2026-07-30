@@ -1081,3 +1081,39 @@ def test_the_shear_silo_stage_re_runs_a_pier_on_its_FRAME_basis(monkeypatch):
     assert len(seen) == 1
     assert seen[0]["demand_basis"] is basis
     assert seen[0]["end_fixity"] is ef
+
+
+def test_the_silo_predictor_reproduces_the_real_bent_stiffness(monkeypatch):
+    """Regression: ``k_at`` predicted ONE COLUMN while the rule it plans against
+    -- and ``m_at`` -- are per BENT.  Two neighbours with different column
+    counts then looked balanced to the planner while the real check failed, so
+    it never softened anyone.  At a bent's own silo the predictor must return
+    exactly the stiffness that was measured there."""
+    from seismic_column import batch as B
+
+    bent = BentStiffness(name="P1", frame="F1", order=0, Hcol=240.0, silo=0.0,
+                         k=(12.0,), mass_long=1.0, mass_trans=1.0,
+                         deck_link="bearing", bound_labels=("3D",),
+                         n_columns=3)
+    assert bent.end_fixity(LONGITUDINAL) == "free"      # so k_fixed is not used
+    assert bent.stiffness(LONGITUDINAL, 0) == pytest.approx(36.0)
+
+    class _D:
+        D = 78.0
+    class _Bnd:
+        multiplier = 1.0
+    class _A:
+        EI_col = EI_shaft = 1.0e9
+        bounds = [_Bnd()]
+    class _RR:
+        shaft = _D()
+        assessment = _A()
+
+    monkeypatch.setattr(B, "stiffness_at_silo",
+                        lambda *a, **k: 4.0)            # any raw value
+    k_at, _m_at, to_raw = B._silo_ctx([bent], {"P1": _RR()}, GlobalConfig(),
+                                      {"P1": 0.0})
+    got = k_at(bent, 0.0, 0, LONGITUDINAL)
+    assert got == pytest.approx(bent.stiffness(LONGITUDINAL, 0))
+    # and a target in those units converts back to what required_silo bisects on
+    assert to_raw(bent, got) == pytest.approx(4.0)

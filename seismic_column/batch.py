@@ -395,12 +395,25 @@ def _silo_ctx(bents: list[BentStiffness], results: dict[str, RowResult],
 
     def k_at(b: BentStiffness, silo: float, bound: int,
              direction: str = LONGITUDINAL) -> float:
+        """PER BENT, to match ``BentStiffness.stiffness`` and ``m_at``.
+
+        The columns of a bent act in parallel, so the bent is ``n`` times one
+        column.  Leaving the factor off makes the predictor disagree with the
+        rule it is planning against wherever two neighbours carry different
+        column counts -- a 2-column bent beside a 3-column one looks balanced
+        to the planner while the real check fails, so it never softens anyone.
+        """
         rr = results[b.name]
-        return corr[b.name] * stiffness_at_silo(
+        return max(b.n_columns, 1) * corr[b.name] * stiffness_at_silo(
             Geometry(Hcol=b.Hcol, D_shaft=rr.shaft.D),
             rr.assessment.EI_col, rr.assessment.EI_shaft,
             rr.assessment.bounds[bound].multiplier, silo,
             end_fixity=b.end_fixity(direction))
+
+    def to_raw(b: BentStiffness, k_bent: float) -> float:
+        """A bent-level ``k_at`` target back in the raw per-column units that
+        :func:`required_silo` bisects on."""
+        return k_bent / (max(b.n_columns, 1) * (corr[b.name] or 1.0))
 
     def m_at(b: BentStiffness, silo: float, direction: str) -> float:
         rr = results[b.name]
@@ -408,7 +421,7 @@ def _silo_ctx(bents: list[BentStiffness], results: dict[str, RowResult],
                                 cfg.concrete_unit_weight)
         return b.mass(direction) + cfg.self_weight_mass_factor * dW / G_IN_S2
 
-    return k_at, m_at
+    return k_at, m_at, to_raw
 
 
 def _plan_silos(bents: list[BentStiffness], results: dict[str, RowResult],
@@ -435,7 +448,7 @@ def _plan_silos(bents: list[BentStiffness], results: dict[str, RowResult],
     step = cfg.silo_step_ft * 12.0
     silos = {b.name: max(b.silo, floors.get(b.name, 0.0)) for b in bents}
     notes: list[str] = []
-    k_at, m_at = _silo_ctx(bents, results, cfg, silos)
+    k_at, m_at, to_raw = _silo_ctx(bents, results, cfg, silos)
 
     def soften_to(target_k: float, who: BentStiffness, other: str,
                   bound: int, rule: str, direction: str) -> bool:
@@ -448,7 +461,8 @@ def _plan_silos(bents: list[BentStiffness], results: dict[str, RowResult],
         rr = results[who.name]
         geom = Geometry(Hcol=who.Hcol, D_shaft=rr.shaft.D)
         h = required_silo(geom, rr.assessment.EI_col, rr.assessment.EI_shaft,
-                          rr.assessment.bounds[bound].multiplier, target_k,
+                          rr.assessment.bounds[bound].multiplier,
+                          to_raw(who, target_k),
                           silo_min=silos[who.name], silo_max=cap,
                           end_fixity=who.end_fixity(direction))
         if h is None:                      # the cap binds — go as deep as allowed
@@ -562,7 +576,8 @@ def _plan_silos_min(bents: list[BentStiffness], results: dict[str, RowResult],
     # this is not.)
     states = {b.name: silo_states(floors.get(b.name, 0.0), cap, step)
               for b in bents}
-    k_at, m_at = _silo_ctx(bents, results, cfg, {b.name: b.silo for b in bents})
+    k_at, m_at, _to_raw = _silo_ctx(bents, results, cfg,
+                                    {b.name: b.silo for b in bents})
 
     def feasible(bi: BentStiffness, si: float,
                  bj: BentStiffness, sj: float) -> bool:
