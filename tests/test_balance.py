@@ -990,3 +990,58 @@ def test_status_distinguishes_the_three_outcomes():
     assert _chk(STIFFNESS_CHECK, 0.9, True).status == "OK"
     assert _chk(STIFFNESS_CHECK, 0.6, False).status == "NG"
     assert _chk(GEOMETRY_CHECK, 0.6, False, tha=True).status == "THA"
+
+
+# --- silo sized for a pier's OWN shear, not just for balance ---------------
+def test_shear_silo_is_zero_when_the_column_shear_check_passes():
+    from seismic_column.batch import shear_silo_required
+    class _Ck:
+        name, demand, capacity = "Column shear", 400.0, 900.0
+    class _A:
+        H_free = 240.0
+        checks = [_Ck()]
+    class _R:
+        assessment = _A()
+    assert shear_silo_required(_R()) == 0.0
+
+
+def test_shear_silo_scales_with_the_demand_capacity_ratio():
+    """Vo ~ 1/H_free, so H_required = H_free * (Vo/phiVn)."""
+    from seismic_column.batch import shear_silo_required
+    class _Ck:
+        name, demand, capacity = "Column shear", 1800.0, 900.0   # D/C = 2
+    class _A:
+        H_free = 240.0
+        checks = [_Ck()]
+    class _R:
+        assessment = _A()
+    # doubling the length halves Vo, so it needs about another H_free
+    assert shear_silo_required(_R()) == pytest.approx(240.0 * 1.10)
+
+
+def test_a_missing_shear_check_is_not_an_error():
+    from seismic_column.batch import shear_silo_required
+    class _A:
+        H_free = 240.0
+        checks = []
+    class _R:
+        assessment = _A()
+    assert shear_silo_required(_R()) == 0.0
+
+
+@pytest.mark.slow
+def test_a_short_stiff_pier_gets_a_silo_for_its_own_shear():
+    """The balance search never finds this: a pier can be perfectly balanced
+    with its neighbours and still fail its own column-shear check."""
+    df = default_dataframe(3)
+    df["Hcol_ft"] = [6.0, 7.0, 8.0]          # short enough that Vo = Mo/H bites
+    out = run_batch_balanced(df, _cfg(optimize=False, balance_auto_silo=True))
+    log = "\n".join(out.balance.log)
+    if any(r.silo > 0 for r in out.results):
+        assert "Column shear drove a silo" in log or out.balance.passed
+    # whatever it did, no pier may be left failing its shear check
+    for rr in out.results:
+        ck = next((c for c in rr.assessment.checks
+                   if c.name == "Column shear"), None)
+        if ck is not None and ck.capacity > 0:
+            assert ck.demand / ck.capacity <= 1.02, (rr.name, rr.silo / 12)

@@ -334,11 +334,23 @@ def run_batch_balanced(df: pd.DataFrame, cfg: GlobalConfig,
                                         on_candidate=on_candidate,
                                         on_status=balance_progress)
 
+    # Short-column shear: a pier can be perfectly balanced with its neighbours
+    # and still fail its own shear check, because Vo = n*Mo/H_free and a short
+    # column simply develops too much of it.  Size those silos FIRST so the
+    # balance search starts from depths that are already necessary.
+    shear_floors: dict = {}
+    shear_log: list[str] = []
+    if results:
+        shear_floors, shear_log = _shear_silo_floors(
+            results, rows_by_name, order, cfg, on_candidate=on_candidate,
+            on_status=balance_progress)
+
     balance = None
     if cfg.balance_check:
         balance = _balance_stage(results, rows_by_name, order, cfg,
                                  on_candidate=on_candidate,
-                                 on_status=balance_progress)
+                                 on_status=balance_progress,
+                                 shear_floors=shear_floors)
 
     frame_checks: list[FrameCheck] = []
     if balance is not None:
@@ -350,8 +362,8 @@ def run_batch_balanced(df: pd.DataFrame, cfg: GlobalConfig,
                                  get_provisions(cfg.code),
                                  soil_bounds=(cfg.soil_stiff_factor,
                                               cfg.soil_soft_factor))
-    if balance is not None and frame_log:
-        balance.log[:0] = frame_log
+    if balance is not None and (frame_log or shear_log):
+        balance.log[:0] = shear_log + frame_log
 
     final = {rr.name: rr for rr in results}      # post-balance designs
     summary = pd.DataFrame([
@@ -689,9 +701,87 @@ def _frame_demand_stage(results: list[RowResult],
     return log
 
 
+def shear_silo_required(rr) -> float:
+    """Extra silo a pier needs to bring its COLUMN SHEAR within capacity, in.
+
+    A plastic hinge develops ``Vo = n*Mo/H_free`` -- one hinge for a cantilever,
+    two for a fixed-fixed member.  ``Vo`` is therefore inversely proportional to
+    the free length, and a SHORT column develops enormous shear when it hinges.
+    Transverse steel cannot fix that: more spiral raises the confined strength,
+    which raises Mp, which raises Vo again.  The lever is the only thing that
+    actually moves the demand.
+
+    So the silo is the lever, and the required length follows directly from the
+    demand/capacity ratio::
+
+        Vo ~ 1/H_free   =>   H_required = H_free * (Vo / phiVn)
+
+    The balance search never finds this, because it sizes silos for stiffness
+    RATIOS between piers, not for a pier's own capacity -- a short pier can be
+    perfectly balanced with its neighbours and still fail its own shear check.
+
+    Returns 0 when the shear check already passes.  The 10 % margin covers Mo
+    drifting a little with the plastic hinge length as the column lengthens;
+    the caller iterates, so it only has to be close.
+    """
+    ck = next((c for c in rr.assessment.checks if c.name == "Column shear"), None)
+    if ck is None or ck.capacity <= 0.0:
+        return 0.0
+    dc = ck.demand / ck.capacity
+    if dc <= 1.0:
+        return 0.0
+    return max(0.0, rr.assessment.H_free * (dc - 1.0) * 1.10)
+
+
+def _shear_silo_floors(results: list[RowResult], rows_by_name: dict,
+                       order: dict, cfg: GlobalConfig, on_candidate=None,
+                       on_status=None, max_passes: int = 4) -> tuple[dict, list]:
+    """Silo floors that make every pier's own column-shear check pass.
+
+    Run BEFORE the balance stage so its search starts from a set of depths that
+    are already structurally necessary, rather than discovering later that a
+    balanced bridge still has piers failing on shear.  Lengthening a column
+    changes Lp, Mo and the demand, so this iterates.
+    """
+    floors: dict[str, float] = {}
+    log: list[str] = []
+    for p in range(1, max_passes + 1):
+        need = {}
+        for rr in results:
+            extra = shear_silo_required(rr)
+            if extra > 1e-6:
+                need[rr.name] = floors.get(rr.name, rr.silo) + extra
+        if not need:
+            break
+        if on_status is not None:
+            on_status(f"Short-column shear: pass {p} ({len(need)} pier(s))")
+        for i, rr in enumerate(results):
+            if rr.name not in need:
+                continue
+            floors[rr.name] = need[rr.name]
+            try:
+                results[i] = run_row(rows_by_name[rr.name], cfg,
+                                     on_candidate=on_candidate,
+                                     silo=floors[rr.name])
+            except Exception as exc:
+                log.append(f"{rr.name}: could not re-analyse at a "
+                           f"{floors[rr.name]/12:.1f} ft silo ({exc}).")
+                floors.pop(rr.name, None)
+    if floors:
+        log.insert(0, (
+            "Column shear drove a silo on "
+            + ", ".join(f"{n} {v/12:.0f} ft" for n, v in sorted(floors.items()))
+            + ". A short column develops Vo = n*Mo/H_free when it hinges, so "
+              "the free length is the only lever that lowers it — transverse "
+              "steel raises Mp and with it Vo. These are floors; the balance "
+              "search may deepen them but never reduces them."))
+    return floors, log
+
+
 def _balance_stage(results: list[RowResult], rows_by_name: dict[str, pd.Series],
                    order: dict[str, int], cfg: GlobalConfig,
-                   on_candidate=None, on_status=None) -> BalanceResult:
+                   on_candidate=None, on_status=None,
+                   shear_floors: dict | None = None) -> BalanceResult:
     """Check adjacent-pier balance and, if enabled, auto-size column silos.
 
     Returns the final :class:`~seismic_column.balance.BalanceResult`; ``results``
@@ -718,8 +808,10 @@ def _balance_stage(results: list[RowResult], rows_by_name: dict[str, pd.Series],
         return result
 
     by_name = {rr.name: rr for rr in results}
-    floors = {rr.name: float(rows_by_name[rr.name].get("silo_ft", 0.0) or 0.0) * 12.0
-              for rr in results}
+    floors = {rr.name: max(
+        float(rows_by_name[rr.name].get("silo_ft", 0.0) or 0.0) * 12.0,
+        (shear_floors or {}).get(rr.name, 0.0))
+        for rr in results}
 
     minimise = cfg.balance_strategy == "min_silo"
     if minimise and not _all_frames_single(bents):
