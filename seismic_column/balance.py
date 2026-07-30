@@ -61,7 +61,8 @@ import math
 from dataclasses import dataclass, field, replace
 
 from .geometry import Geometry
-from .io_schema import (DIRECTIONS, LONGITUDINAL, TRANSVERSE, frame_keys,
+from .io_schema import (DIRECTIONS, LONGITUDINAL, TRANSVERSE, deck_links,
+                        frame_keys,
                         head_moment_connection, in_frame)
 
 STIFFNESS_CHECK = "Balanced stiffness (adjacent)"
@@ -138,18 +139,26 @@ class BentStiffness:
         an expansion joint and carries a deck either side."""
         return frame_keys(self.frame)
 
-    def participates(self, direction: str) -> bool:
-        """Does this bent resist the deck in ``direction``?
+    @property
+    def links(self) -> tuple[str, ...]:
+        """How this bent meets each frame it carries, aligned with :attr:`frames`."""
+        return deck_links(self.deck_link, len(self.frames) or 1)
+
+    def participates(self, direction: str, link: str | None = None) -> bool:
+        """Does this bent resist a deck in ``direction`` through ``link``?
 
         ``integral`` is monolithic and resists both ways; ``bearing`` is released
         longitudinally but shear-keyed, so it resists transversely only; ``free``
-        resists neither.
+        resists neither.  With no ``link`` given, ANY of its links counts -- the
+        bent resists something in this direction.
         """
-        if self.deck_link == "free":
+        if link is None:
+            return any(self.participates(direction, ln) for ln in self.links)
+        if link == "free":
             return False
-        if self.deck_link == "bearing":
+        if link == "bearing":
             return direction == TRANSVERSE
-        return True                                   # integral
+        return True                                   # integral / pinned
 
     def end_fixity(self, direction: str) -> str:
         """Rotational restraint at the column head: ``'fixed'`` or ``'free'``.
@@ -173,13 +182,13 @@ class BentStiffness:
         hold a rotation the column-to-cap connection does not carry.
         """
         if self.n_columns <= 1:
-            return ("fixed" if self.deck_link == "integral"
+            return ("fixed" if "integral" in self.links
                     and direction == LONGITUDINAL else "free")
         if not head_moment_connection(self.cap_fixity, direction):
             return "free"
         if direction == TRANSVERSE:
             return "fixed"
-        return "fixed" if self.deck_link == "integral" else "free"
+        return "fixed" if "integral" in self.links else "free"
 
     def stiffness(self, direction: str, bound: int) -> float:
         """Effective lateral stiffness of the BENT in ``direction``, kip/in.
@@ -424,7 +433,7 @@ def bent_stiffness(name: str, frame: str, order: int, assessment,
     # cap_fixity only applies to a bent that actually has a cap
     _multi = n_columns > 1
     _needs_fixed = (
-        (deck_link == "integral"
+        ("integral" in deck_links(deck_link, len(frame_keys(frame)) or 1)
          and (not _multi or head_moment_connection(cap_fixity, LONGITUDINAL)))
         or (_multi and head_moment_connection(cap_fixity, TRANSVERSE)))
     if _needs_fixed and D_shaft > 0:
@@ -472,28 +481,36 @@ def frames_for(bents: list[BentStiffness], direction: str) -> list[Frame]:
     is analysed alone, and a rigid deck leans on the whole bent) and HALF its
     tributary mass (the half-span belonging to that frame's deck).
     """
+    # Each (frame, link) pair the bent declares, kept together: the SAME bent
+    # can meet two decks differently -- a free bearing under the end of a
+    # continuous frame and a pin under the simple span beside it.
     groups: dict[str, list[BentStiffness]] = {}
-    declared_share: dict[str, float] = {}
+    resisting: dict[str, int] = {}
     for b in sorted(bents, key=lambda b: b.order):
-        keys = b.frames
+        keys, links = b.frames, b.links
         if not keys:
             continue
-        # Naming two frames in the cell IS the declaration that this bent
-        # carries a deck either side of a joint: it joins both, full stiffness
-        # in each and its tributary mass divided between them.
-        declared_share[b.name] = 1.0 / len(keys)
+        # How many of its decks this bent actually resists in THIS direction.
+        # Its tributary divides between exactly those: a pier that pins one
+        # span longitudinally carries all of that span and none of the deck it
+        # only bears, while transversely the shear keys engage both and it
+        # takes half of each.
+        n = sum(1 for ln in links if b.participates(direction, ln))
+        resisting[b.name] = n
         for key in keys:
             groups.setdefault(key, []).append(b)
 
     frames: list[Frame] = []
     for key in sorted(groups, key=lambda k: min(b.order for b in groups[k])):
         acting = [b for b in groups[key]
-                  if b.mass(direction) > 0 and b.participates(direction)]
+                  if b.mass(direction) > 0 and resisting.get(b.name)
+                  and b.participates(direction, dict(zip(b.frames,
+                                                         b.links))[key])]
         if acting:
             frames.append(Frame(key=key, direction=direction,
                                 members=list(acting),
                                 order=min(b.order for b in acting),
-                                mass_share={b.name: declared_share[b.name]
+                                mass_share={b.name: 1.0 / resisting[b.name]
                                             for b in acting}))
 
     # An expansion-joint bent sits at the END of one frame's deck and the START

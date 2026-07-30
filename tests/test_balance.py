@@ -1225,3 +1225,58 @@ def test_a_blank_or_dashed_entry_in_a_list_is_ignored():
     assert frame_keys("F1,F1") == ("F1",)             # a repeat is not a share
     assert frame_keys("F2, -") == ("F2",)
     assert frame_keys("-") == () and frame_keys("") == ()
+
+
+# --- a pier can meet its two decks DIFFERENTLY -----------------------------
+def _a7_pattern():
+    """The EN bust: C1 sits on free bearings at BOTH ends, but the pier at one
+    end also PINS the simple span beside it, and the pier at the other end only
+    rollers its neighbour.  One deck_link per bent cannot say that."""
+    return [_bent("A6", [100.0], m=2.0, frame="SA6", order=0,
+                  deck_link="bearing"),
+            _bent("A7", [100.0], m=4.0, frame="SA6, C1", order=1,
+                  deck_link="pinned, bearing"),
+            _bent("A8", [100.0], m=2.0, frame="C1", order=2,
+                  deck_link="integral"),
+            _bent("A10", [100.0], m=2.0, frame="C1, SA11", order=3,
+                  deck_link="bearing, bearing"),
+            _bent("A11", [100.0], m=2.0, frame="SA11", order=4,
+                  deck_link="pinned")]
+
+
+def test_a_pier_pinning_one_span_carries_it_all_longitudinally():
+    """A7 pins SA6 and only bears C1, so longitudinally ALL of its tributary
+    belongs to SA6 and none to C1 -- it is not a longitudinal member of C1."""
+    lon = {f.key: f for f in frames_for(_a7_pattern(), LONGITUDINAL)}
+    assert lon["SA6"].names == ("A7",)          # A6 only rollers it
+    assert lon["SA6"].M() == pytest.approx(4.0)  # the WHOLE tributary, not half
+    assert lon["C1"].names == ("A8",)           # both ends are free bearings
+    assert "SA11" in lon and lon["SA11"].names == ("A11",)
+
+
+def test_the_same_pier_splits_its_mass_transversely():
+    """Shear keys engage both decks, so transversely A7 is in both frames at
+    half its tributary -- the direction changes the answer, not the data."""
+    tra = {f.key: f for f in frames_for(_a7_pattern(), TRANSVERSE)}
+    assert tra["SA6"].names == ("A6", "A7")
+    assert tra["C1"].names == ("A7", "A8", "A10")
+    assert tra["SA6"].M() == pytest.approx(2.0 + 0.5 * 4.0)
+    assert tra["SA6"].shared("A7") and tra["C1"].shared("A7")
+
+
+def test_a_pier_free_to_both_decks_is_no_longitudinal_frame():
+    """A10 has a free bearing under C1 and a roller under the next span, so it
+    restrains nothing longitudinally -- only its own self weight."""
+    lon = {f.key: f for f in frames_for(_a7_pattern(), LONGITUDINAL)}
+    assert not any("A10" in f.names for f in lon.values())
+    tra = {f.key: f for f in frames_for(_a7_pattern(), TRANSVERSE)}
+    assert tra["C1"].shared("A10") and tra["SA11"].shared("A10")
+
+
+def test_deck_link_list_must_line_up_with_the_frame_list():
+    from seismic_column.io_schema import validate
+    df = default_dataframe(2)
+    df["frame"] = ["F1, F2", "F2"]
+    df["deck_link"] = ["pinned, bearing, integral", "pinned"]
+    with pytest.raises(ValueError, match="one link per frame"):
+        validate(df)

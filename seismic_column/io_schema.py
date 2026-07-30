@@ -161,6 +161,27 @@ def in_frame(frame: object) -> bool:
     """True if this ``frame`` value takes part in the balance checks."""
     return bool(frame_keys(frame))
 
+
+def deck_links(link: object, n_frames: int = 1) -> tuple[str, ...]:
+    """How the deck attaches, ONE ENTRY PER FRAME this pier carries.
+
+    A pier between two decks can meet them differently -- a free bearing under
+    the end of a continuous frame and a pin under the simple span beside it is
+    the ordinary case, and a single value cannot say so.  Give one link per
+    frame, in the same order: ``frame = "FA7, C1"`` with
+    ``deck_link = "pinned, bearing"`` reads *pinned to FA7, free bearing to C1*.
+
+    A single value is broadcast to every frame, which is what every table
+    before this meant.
+    """
+    txt = str(link).strip().lower()
+    parts = [k.strip() for k in txt.replace(";", ",").split(",") if k.strip()]
+    if not parts:
+        parts = ["pinned"]
+    if len(parts) == 1:
+        return tuple(parts * max(n_frames, 1))
+    return tuple(parts)
+
 # Human-friendly labels and help text for each table column (used by the GUI).
 COLUMN_META: dict[str, tuple[str, str]] = {
     "name": ("Column ID", "A label for this column / bent (e.g. Pier 3)."),
@@ -642,10 +663,19 @@ def validate(df: pd.DataFrame, min_shaft_oversize: float = 0.0,
     # supported case and keeps the fixed-free stiffness a legacy table had.
     df["deck_link"] = (df["deck_link"].fillna("").astype(str).str.strip()
                        .str.lower().replace("", "pinned"))
-    bad_link = sorted(set(df["deck_link"]) - set(DECK_LINKS))
+    bad_link = sorted({tok for v in df["deck_link"]
+                       for tok in deck_links(v)} - set(DECK_LINKS))
     if bad_link:
         raise ValueError(f"Unknown deck_link {bad_link}; choose from "
                          f"{list(DECK_LINKS)}")
+    # one link per frame, or a single link broadcast to all of them
+    for nm, fr, lk in zip(df["name"], df["frame"], df["deck_link"]):
+        nf, nl = len(frame_keys(fr)), len(deck_links(lk))
+        if nf and nl != 1 and nl != nf:
+            raise ValueError(
+                f"{nm}: deck_link lists {nl} link(s) but frame lists {nf} "
+                f"frame(s) — give one link per frame, in the same order, or a "
+                f"single link for all of them")
     # A silo is optional everywhere; blank = none.
     df["silo_ft"] = pd.to_numeric(df["silo_ft"], errors="coerce").fillna(0.0)
     # A bent is single-column unless told otherwise, which is exactly what every
