@@ -231,3 +231,74 @@ def test_a_pinned_cap_is_softer_in_the_balance_layer():
     # two columns either way, but the pinned cap keeps the cantilever stiffness
     assert bs("pinned").stiffness(TRANSVERSE, 0) == pytest.approx(200.0)
     assert bs("fixed").stiffness(TRANSVERSE, 0) == pytest.approx(800.0)
+
+
+# --- production hardening: schema, validation, wide bents ------------------
+def test_a_table_without_the_multicolumn_columns_still_loads():
+    """Every project written before multi-column bents existed."""
+    from seismic_column.io_schema import default_dataframe, validate
+    df = default_dataframe(3).drop(columns=["n_columns", "col_spacing_ft",
+                                            "cap_fixity"])
+    v = validate(df)
+    assert (v["n_columns"] == 1).all()          # single-column, as it meant
+    assert (v["col_spacing_ft"] == 0.0).all()
+    assert (v["cap_fixity"] == "fixed").all()   # ignored while n_columns == 1
+
+
+def test_a_multicolumn_bent_without_a_spacing_is_rejected():
+    """The spacing IS the lever arm; without it there is no couple to find."""
+    from seismic_column.io_schema import default_dataframe, validate
+    df = default_dataframe(2)
+    df.loc[0, "n_columns"] = 2                  # no col_spacing_ft
+    with pytest.raises(ValueError, match="col_spacing_ft"):
+        validate(df)
+
+
+def test_zero_or_negative_column_count_is_rejected():
+    from seismic_column.io_schema import default_dataframe, validate
+    df = default_dataframe(2)
+    df.loc[0, "n_columns"] = 0
+    with pytest.raises(ValueError, match="n_columns"):
+        validate(df)
+
+
+def test_an_unknown_cap_fixity_is_rejected():
+    from seismic_column.io_schema import default_dataframe, validate
+    df = default_dataframe(2)
+    df.loc[0, ["n_columns", "col_spacing_ft", "cap_fixity"]] = [2, 20.0, "welded"]
+    with pytest.raises(ValueError, match="cap_fixity"):
+        validate(df)
+
+
+@pytest.mark.parametrize("n", [2, 3, 4, 5, 6, 8])
+def test_wide_bents_keep_the_statics_exact(n):
+    """Multi-cell bents: the couple must balance at any width."""
+    b = evaluate_bent(n, 18 * 12.0, 700.0 * n, **_kw())
+    xs = [p.x for p in b.positions]
+    assert sum(p.delta_P for p in b.positions) == pytest.approx(0.0, abs=1e-6)
+    assert (sum(p.delta_P * x for p, x in zip(b.positions, xs))
+            == pytest.approx(b.M_overturn))
+    # the axial swing falls as the bent widens -- same overturning, bigger Sx^2
+    assert b.delta_P > 0
+    # cost stays bounded however wide it gets
+    assert len({id(p.assessment) for p in b.positions}) <= 3
+
+
+def test_a_wider_bent_takes_a_smaller_axial_swing():
+    narrow = evaluate_bent(2, 18 * 12.0, 1400.0, **_kw())
+    wide = evaluate_bent(6, 18 * 12.0, 4200.0, **_kw())
+    assert wide.delta_P < narrow.delta_P
+
+
+@pytest.mark.parametrize("n", [3, 5, 7])
+def test_an_odd_bent_has_a_centre_column_with_no_swing(n):
+    b = evaluate_bent(n, 20 * 12.0, 700.0 * n, **_kw())
+    mid = b.positions[n // 2]
+    assert mid.x == pytest.approx(0.0)
+    assert mid.delta_P == pytest.approx(0.0)
+
+
+def test_the_governing_position_is_always_an_extreme():
+    for n in (2, 3, 4, 5, 6):
+        b = evaluate_bent(n, 18 * 12.0, 700.0 * n, **_kw())
+        assert b.governing.index in (0, n - 1)

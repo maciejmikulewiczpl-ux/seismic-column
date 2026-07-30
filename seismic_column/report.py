@@ -628,7 +628,10 @@ def balance_report(balance) -> str:
 
     add("# Balanced stiffness & balanced frame geometry")
     add("")
-    add(f"**Result:** {'PASS ✅' if balance.passed else 'FAIL ❌'}"
+    _tha = balance.needs_tha
+    _verdict = ("FAIL ❌" if balance.failed else
+                ("PASS ✅ — with time-history required" if _tha else "PASS ✅"))
+    add(f"**Result:** {_verdict}"
         + ("" if balance.converged else "  —  *did not converge*"))
     add("")
     add("**Scope.** The two rules act at different levels. Balanced *stiffness* "
@@ -830,7 +833,8 @@ def balance_report(balance) -> str:
                 ratio = "—" if math.isnan(c.ratio) else f"{c.ratio:.3f}"
                 add(f"| {c.name} | {c.pair[0]}–{c.pair[1]} | {c.scope or '—'} "
                     f"| {c.bound} | {ratio} | {c.limit:.2f} | "
-                    f"{'OK ✅' if c.passed else 'NG ❌'} | {c.note} |")
+                    f"{ {'OK': 'OK ✅', 'NG': 'NG ❌',
+                        'THA': 'THA ⚠'}[c.status] } | {c.note} |")
             add("")
 
     if balance.log:
@@ -845,6 +849,31 @@ def balance_report(balance) -> str:
         add("")
         for entry in balance.log:
             add(f"- {entry}")
+        add("")
+
+    if _tha:
+        add("## Time-history analysis required")
+        add("")
+        add(f"**{len(_tha)} balanced frame-GEOMETRY pair(s) could not be met by "
+            f"practical means.** The silo search pursued them and stopped: "
+            f"closing them further would need silo depths or diameter changes "
+            f"beyond what it could reach.")
+        add("")
+        add("| Pair | Direction | Bound | Ratio | Limit | Values |")
+        add("|:--|:--|:--|--:|--:|:--|")
+        for c in _tha:
+            add(f"| {c.pair[0]}–{c.pair[1]} | {c.direction} | {c.bound} "
+                f"| {c.ratio:.3f} | {c.limit:.2f} | {c.note} |")
+        add("")
+        add("Per SDC §7.1.3 / SGS §4.1.3 these are cleared by **nonlinear "
+            "time-history analysis**, not by forcing the ratio. The balance "
+            "rules exist to let a bridge *avoid* a more rigorous analysis; "
+            "where they cannot be met, that analysis is the code's own route.")
+        add("")
+        add("**The within-frame stiffness rules are NOT referred here and "
+            "remain enforced.** That rule governs how a frame distributes "
+            "demand between its own members, and a time-history run does not "
+            "excuse it — any such shortfall is a hard failure above.")
         add("")
 
     add("## How this relates to the seismic checks")

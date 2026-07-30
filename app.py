@@ -997,14 +997,30 @@ if "summary" in st.session_state:
         if not balance.checks:
             st.info("No adjacent pairs to check — fewer than two piers share a "
                     "frame. Set the **frame** column in the batch table.")
-        elif balance.passed:
+        elif balance.passed and not balance.needs_tha:
             st.success(f"All adjacent pairs comply "
                        f"(κ ratio ≥ {cr.k_ratio_min:.2f}, "
                        f"T ratio ≥ {cr.T_ratio_min:.2f}).")
         else:
-            st.error(f"{len(balance.failed)} adjacent-pair check(s) fail."
-                     + ("" if balance.converged else
-                        " The silo search did not converge — see the log."))
+            if balance.failed:
+                st.error(f"{len(balance.failed)} check(s) FAIL and must be "
+                         f"designed out — these are within-frame stiffness "
+                         f"rules, which a time-history run does not excuse."
+                         + ("" if balance.converged else
+                            " The silo search did not converge — see the log."))
+            if balance.needs_tha:
+                _pairs = ", ".join(sorted({f"{c.pair[0]}–{c.pair[1]}"
+                                           for c in balance.needs_tha}))
+                st.warning(
+                    f"**Time-history analysis required** — balanced frame "
+                    f"GEOMETRY could not be met by practical means at "
+                    f"{len(balance.needs_tha)} pair(s): {_pairs}. The silo "
+                    f"search pursued it and stopped. Per SDC §7.1.3 / "
+                    f"SGS §4.1.3 this is cleared by nonlinear time-history "
+                    f"analysis rather than by forcing the ratio — the rules "
+                    f"exist to let a bridge *avoid* a more rigorous analysis, "
+                    f"not to substitute for one. The within-frame stiffness "
+                    f"rules are still enforced.")
 
         # A silo lengthens the free column, which changes Lp, the displacement
         # demand, Vo, Vp and P-Delta — so every siloed pier was re-run through
