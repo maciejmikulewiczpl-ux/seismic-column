@@ -77,7 +77,35 @@ TEXT_COLUMNS: tuple[str, ...] = ("name", "frame", "deck_link", "cap_fixity")
 # Pinning therefore does three things at once -- roughly quarters the transverse
 # stiffness, halves Vo, and removes the axial swing -- which makes it a powerful
 # lever when a fixed-cap bent will not work.
-CAP_FIXITIES: tuple[str, ...] = ("fixed", "pinned")
+CAP_FIXITIES: tuple[str, ...] = ("fixed", "pinned", "pinned_long",
+                                "pinned_trans")
+
+
+def head_moment_connection(cap_fixity: str, direction: str) -> bool:
+    """Does the COLUMN-TO-CAP connection transmit moment in ``direction``?
+
+    A detail can be a moment connection one way and a pin the other, which is
+    why this is per direction:
+
+        fixed         moment both ways (monolithic) -- the default
+        pinned        a pin both ways
+        pinned_long   pinned longitudinally, moment transversely
+        pinned_trans  moment longitudinally, pinned transversely
+
+    This is only HALF of what fixes a column head.  A moment connection needs
+    something above able to resist it: longitudinally the deck has to be
+    integral, and transversely there has to be a cap spanning to a second
+    column.  A pin, though, is sufficient on its own to release the head --
+    whatever sits above cannot hold a rotation the connection does not carry.
+    """
+    cf = (cap_fixity or "fixed").strip().lower()
+    if cf == "pinned":
+        return False
+    if cf == "pinned_long":
+        return direction != LONGITUDINAL
+    if cf == "pinned_trans":
+        return direction != TRANSVERSE
+    return True
 NUMERIC_COLUMNS = tuple(c for c in COLUMNS if c not in TEXT_COLUMNS)
 
 # How the deck attaches at a bent.  This is the physical detail; both which
@@ -139,6 +167,12 @@ COLUMN_META: dict[str, tuple[str, str]] = {
                    "develops an axial push/pull couple between the columns. "
                    "'pinned' = a detailed pin, so each column is an INDEPENDENT "
                    "cantilever: fixed-free, Vo = Mo/H, and NO couple at all. "
+                   "'pinned_long' / 'pinned_trans' pin ONE direction and keep "
+                   "the moment connection in the other. A pin releases the "
+                   "column head on its own; a moment connection only fixes it "
+                   "if something above can resist — an integral deck "
+                   "longitudinally, or a cap spanning to a second column "
+                   "transversely. "
                    "Pinning roughly quarters the transverse stiffness, halves "
                    "Vo and removes the axial swing. Ignored if the bent has one "
                    "column."),

@@ -61,7 +61,8 @@ import math
 from dataclasses import dataclass, field, replace
 
 from .geometry import Geometry
-from .io_schema import DIRECTIONS, LONGITUDINAL, TRANSVERSE, in_frame
+from .io_schema import (DIRECTIONS, LONGITUDINAL, TRANSVERSE,
+                        head_moment_connection, in_frame)
 
 STIFFNESS_CHECK = "Balanced stiffness (adjacent)"
 STIFFNESS_ANY_CHECK = "Balanced stiffness (any two)"
@@ -147,19 +148,32 @@ class BentStiffness:
     def end_fixity(self, direction: str) -> str:
         """Rotational restraint at the column head: ``'fixed'`` or ``'free'``.
 
-        Two independent reasons a head is held against rotation:
+        A SINGLE-column bent has no bent cap: it is either integral with the
+        deck or sits on a bearing, which is exactly what ``deck_link`` records,
+        so ``cap_fixity`` does not apply.  Longitudinally an integral bent is
+        fixed; transversely it is a cantilever, having nothing to frame against.
 
-        * an INTEGRAL bent swaying LONGITUDINALLY — the deep continuous girder
-          holds it, which a single-column bent does not get transversely;
-        * a MULTI-COLUMN bent swaying TRANSVERSELY — the cap beam holds it, so
-          the bent acts as a portal frame.  This is the case that inverts the
-          otherwise reliable rule that transverse is always fixed-free.
+        A MULTI-column bent meets a bent cap, and that connection can be a
+        moment connection, a pin, or a pin in one direction only.  There the
+        head is fixed only if BOTH halves are present:
+
+        1. the COLUMN-TO-CAP connection transmits moment in this direction, and
+        2. something above can resist it — longitudinally the deck has to be
+           INTEGRAL (a cap beam is weak out of its own plane, so the cap alone
+           cannot hold the column longitudinally); transversely the cap spans to
+           the other columns, which is enough on its own.
+
+        A pin releases the head whatever sits above it: an integral deck cannot
+        hold a rotation the column-to-cap connection does not carry.
         """
-        if (self.n_columns > 1 and direction == TRANSVERSE
-                and self.cap_fixity != "pinned"):
+        if self.n_columns <= 1:
+            return ("fixed" if self.deck_link == "integral"
+                    and direction == LONGITUDINAL else "free")
+        if not head_moment_connection(self.cap_fixity, direction):
+            return "free"
+        if direction == TRANSVERSE:
             return "fixed"
-        return ("fixed" if self.deck_link == "integral"
-                and direction == LONGITUDINAL else "free")
+        return "fixed" if self.deck_link == "integral" else "free"
 
     def stiffness(self, direction: str, bound: int) -> float:
         """Effective lateral stiffness of the BENT in ``direction``, kip/in.
@@ -387,8 +401,13 @@ def bent_stiffness(name: str, frame: str, order: int, assessment,
     # multi-column bent transversely (the cap restrains the heads).  Either way
     # the second stiffness is needed.
     k_fixed: tuple[float, ...] = ()
-    if (deck_link == "integral"
-            or (n_columns > 1 and cap_fixity != "pinned")) and D_shaft > 0:
+    # cap_fixity only applies to a bent that actually has a cap
+    _multi = n_columns > 1
+    _needs_fixed = (
+        (deck_link == "integral"
+         and (not _multi or head_moment_connection(cap_fixity, LONGITUDINAL)))
+        or (_multi and head_moment_connection(cap_fixity, TRANSVERSE)))
+    if _needs_fixed and D_shaft > 0:
         geom = Geometry(Hcol=Hcol, D_shaft=D_shaft, silo=silo)
         k_fixed = tuple(
             geom.lateral_stiffness(assessment.EI_col, assessment.EI_shaft,

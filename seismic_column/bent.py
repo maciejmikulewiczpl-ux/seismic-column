@@ -38,7 +38,8 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field, replace
 
-from .io_schema import LONGITUDINAL, TRANSVERSE
+from .io_schema import (LONGITUDINAL, TRANSVERSE,
+                        head_moment_connection)
 from .sdc_capacity import (Check, ColumnAssessment, evaluate_column)
 
 
@@ -166,7 +167,7 @@ def evaluate_bent(n_columns: int, spacing: float, axial: float,
     # V*H = sum(Mo) and the base moments are already sum(Mo) -- the couple is
     # exactly zero and each column is an independent cantilever.  So there is
     # nothing to iterate and nothing to envelope beyond the single run.
-    if cap_fixity == "pinned":
+    if not head_moment_connection(cap_fixity, TRANSVERSE):
         a = evaluate_column(axial=P_dead, end_fixity=ef or None,
                             demand_basis=demand_basis, **kw)
         xs0 = offsets(n_columns, spacing)
@@ -175,7 +176,7 @@ def evaluate_bent(n_columns: int, spacing: float, axial: float,
         return BentAssessment(
             n_columns, spacing, poss, list(a.checks), poss[0],
             converged=True, iterations=0,
-            log=[f"{n_columns} columns at {spacing/12:.1f} ft with a PINNED "
+            log=[f"{n_columns} columns at {spacing/12:.1f} ft, PINNED transversely at "
                  f"cap: each column is an independent cantilever, so there is "
                  f"no push/pull couple (V·H = ΣMo is taken entirely by the base "
                  f"moments) and the transverse head stays fixed-FREE. Vo is "
@@ -185,6 +186,10 @@ def evaluate_bent(n_columns: int, spacing: float, axial: float,
     # the bent is a portal frame -- fixed-fixed -- not the cantilever a single
     # column is.
     ef[TRANSVERSE] = "fixed"
+    # A pin longitudinally releases the head there too, whatever the deck does:
+    # an integral deck cannot hold a rotation the connection does not carry.
+    if not head_moment_connection(cap_fixity, LONGITUDINAL):
+        ef[LONGITUDINAL] = "free"
     xs = offsets(n_columns, spacing)
     log: list[str] = []
     dPs = [0.0] * n_columns

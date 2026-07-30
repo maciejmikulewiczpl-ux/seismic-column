@@ -302,3 +302,58 @@ def test_the_governing_position_is_always_an_extreme():
     for n in (2, 3, 4, 5, 6):
         b = evaluate_bent(n, 18 * 12.0, 700.0 * n, **_kw())
         assert b.governing.index in (0, n - 1)
+
+
+# --- the column-to-cap connection, per direction ---------------------------
+def _bs2(n, link, cap):
+    return BentStiffness(name="B", frame="F", order=0, Hcol=240.0, silo=0.0,
+                         k=(100.0,), mass_long=4.0, mass_trans=4.0,
+                         deck_link=link, n_columns=n, cap_fixity=cap,
+                         k_fixed=(400.0,), bound_labels=("best",))
+
+
+def test_a_single_column_bent_ignores_cap_fixity():
+    """It has no bent cap — it is integral with the deck or on a bearing."""
+    for cap in ("fixed", "pinned", "pinned_long", "pinned_trans"):
+        b = _bs2(1, "integral", cap)
+        assert b.end_fixity(LONGITUDINAL) == "fixed"   # deck_link decides
+        assert b.end_fixity(TRANSVERSE) == "free"      # nothing to frame against
+
+
+@pytest.mark.parametrize("cap,long_,trans", [
+    ("fixed",        "fixed", "fixed"),
+    ("pinned",       "free",  "free"),
+    ("pinned_long",  "free",  "fixed"),
+    ("pinned_trans", "fixed", "free"),
+])
+def test_the_cap_connection_releases_the_direction_it_is_pinned_in(cap, long_,
+                                                                   trans):
+    b = _bs2(2, "integral", cap)
+    assert b.end_fixity(LONGITUDINAL) == long_
+    assert b.end_fixity(TRANSVERSE) == trans
+
+
+def test_a_pin_releases_the_head_even_under_an_integral_deck():
+    """An integral deck cannot hold a rotation the connection does not carry."""
+    assert _bs2(2, "integral", "pinned_long").end_fixity(LONGITUDINAL) == "free"
+    assert _bs2(2, "integral", "fixed").end_fixity(LONGITUDINAL) == "fixed"
+
+
+def test_a_moment_connection_alone_does_not_fix_the_head_longitudinally():
+    """It also needs an integral deck — a cap beam is weak out of its plane."""
+    assert _bs2(2, "bearing", "fixed").end_fixity(LONGITUDINAL) == "free"
+    # ... but transversely the cap spanning to the other column IS enough
+    assert _bs2(2, "bearing", "fixed").end_fixity(TRANSVERSE) == "fixed"
+
+
+def test_a_transverse_pin_removes_the_portal_action_and_the_couple():
+    b = evaluate_bent(2, 30 * 12.0, 1400.0, cap_fixity="pinned_trans", **_kw())
+    assert b.delta_P == 0.0
+    assert b.positions[0].assessment.directions[TRANSVERSE].end_fixity == "free"
+
+
+def test_a_longitudinal_pin_keeps_the_transverse_portal_and_its_couple():
+    b = evaluate_bent(2, 30 * 12.0, 1400.0, cap_fixity="pinned_long", **_kw())
+    assert b.delta_P > 0.0                              # portal action survives
+    assert b.positions[0].assessment.directions[TRANSVERSE].end_fixity == "fixed"
+    assert b.positions[0].assessment.directions[LONGITUDINAL].end_fixity == "free"
