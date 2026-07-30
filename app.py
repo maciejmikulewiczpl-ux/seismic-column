@@ -1266,6 +1266,24 @@ if "summary" in st.session_state:
 
                 if any(m.end_fixity == "fixed" for m in fc.members):
                     st.markdown(
+                        "**Deck capacity-design demand.** The deck and its "
+                        "joint are capacity-protected, exactly as the shaft "
+                        "is: the plastic hinge belongs in the COLUMN at both "
+                        "ends, so the deck must be designed to resist the "
+                        "column overstrength moment rather than yield before "
+                        "it. That is why `Vo = 2·Mo/H` is the requirement and "
+                        "not a conservatism.")
+                    st.dataframe(pd.DataFrame([{
+                        "Member": m.name,
+                        "Mo the deck must resist (kip-ft)":
+                            round(m.Mo_interface / 12),
+                        "Vo delivered (kip)": round(m.Vo_interface),
+                    } for m in fc.members]), width="stretch", hide_index=True)
+                    st.caption(
+                        "Whether the deck, joint and diaphragm have that "
+                        "capacity is a superstructure check this tool does not "
+                        "do — these are the demands to design them for.")
+                    st.markdown(
                         "**Shaft capacity-design demand at this mechanism.** "
                         "The shaft is held elastic by design, so it does not "
                         "compete to hinge — it must be sized for the column's "

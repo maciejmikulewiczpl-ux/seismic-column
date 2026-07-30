@@ -776,6 +776,9 @@ def evaluate_column(
         if ef in _ig_cache:
             return _ig_cache[ef]
         fixed = ef == "fixed"
+        # Two hinges in the column, so twice the cantilever's shear.  The deck
+        # is capacity-protected and designed to resist Mo, so it does NOT cap
+        # this -- Vo = 2*Mo/H is the requirement, not a conservative choice.
         Vo_ef = (2.0 if fixed else 1.0) * Mo / geometry.H_free
         if fixity_source != "soil" or soil_profile is None:
             out = (0.0, 0.0, None, Vo_ef)

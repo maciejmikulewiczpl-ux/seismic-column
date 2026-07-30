@@ -176,8 +176,18 @@ class FrameCheck:
 
 
 def _sections(geom: Geometry, EI_col: float, EI_shaft: float, multiplier: float,
-              Mp_col: float, Mp_shaft: float, end_fixity: str) -> list[Section]:
-    """Candidate hinge sections with the shear each needs to reach its Mp."""
+              Mp_col: float, Mp_shaft: float,
+              end_fixity: str) -> list[Section]:
+    """Candidate hinge sections with the shear each needs to reach its Mp.
+
+    The DECK carries ``Mp_col`` like the top of shaft, and deliberately so: the
+    deck and its joint are CAPACITY-PROTECTED, designed to resist the column
+    overstrength moment rather than to yield before it.  The plastic hinge
+    belongs in the column at both ends, which is what makes ``Vo = 2*Mp/H`` the
+    requirement rather than a conservatism.  Letting the joint cap the moment
+    would move the hinge into the superstructure -- the same error as letting
+    the shaft compete to hinge below.
+    """
     A, B, _ = geom._ei_moments(EI_col, EI_shaft, multiplier)
     H = geom.H_free
     L = H + geom.fixity_depth(multiplier)
@@ -296,7 +306,8 @@ def member_capacity(geom: Geometry, EI_col: float, EI_shaft: float,
                           warnings=warn)
 
 
-def _shaft_demand(a, Mo_int: float, Vo_int: float, soil_bounds, warn: list):
+def _shaft_demand(a, Mo_int: float, Vo_int: float, soil_bounds, warn: list,
+                  M_head: float | None = None):
     """Below-ground shaft demand at the fixed-fixed mechanism's head condition.
 
     The column mechanism holds the top of shaft at ``Mp_col``, so the shaft head
@@ -319,11 +330,13 @@ def _shaft_demand(a, Mo_int: float, Vo_int: float, soil_bounds, warn: list):
     # sources for the same number is how they drift apart.
     for d in a.directions.values():
         if (d.end_fixity == "fixed" and d.inground_solution is not None
+                and (M_head is None or abs(M_head - Mo_int) < 1e-9)
                 and abs(d.Vo - Vo_int) < 1e-6 * max(Vo_int, 1.0)):
             return d.inground_moment, d.inground_shear, d.inground_solution
     M, V, sol = inground_demand(
         a.H_free, a.shaft_embed_length, a.EI_col, a.EI_shaft, a.shaft_D,
-        a.P_used, a.soil_profile, Vo_int, soil_bounds, M_head=Mo_int)
+        a.P_used, a.soil_profile, Vo_int, soil_bounds,
+        M_head=(Mo_int if M_head is None else M_head))
     if sol is None:
         warn.append("the p-y solve for the fixed-fixed shaft demand was "
                     "unstable on every soil bound — below-ground demand not "

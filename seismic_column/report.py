@@ -1023,6 +1023,29 @@ def frame_seismic_report(frame_checks) -> str:
             add("")
             # what the capacity-protected shaft must then be sized for
             if any(m.end_fixity == "fixed" for m in fc.members):
+                add("**Deck capacity-design demand at this mechanism**")
+                add("")
+                add("The deck and its joint are capacity-protected, exactly as "
+                    "the shaft is: the plastic hinge belongs in the COLUMN at "
+                    "both ends, so the deck must be designed to resist the "
+                    "column overstrength moment rather than to yield before it. "
+                    "That is what makes `Vo = 2·Mo/H` the requirement here and "
+                    "not a conservative choice — a joint that yielded first "
+                    "would move the hinge into the superstructure.")
+                add("")
+                add("| Member | Mo the deck must resist (kip-ft) | Vo delivered "
+                    "(kip) | per column |")
+                add("|:--|--:|--:|:--|")
+                for m in fc.members:
+                    add(f"| {m.name} | {m.Mo_interface/12:.0f} "
+                        f"| {m.Vo_interface:.0f} | at each column head |")
+                add("")
+                add("**Not checked here.** Whether the deck, the joint and the "
+                    "diaphragm actually have that capacity — that is a "
+                    "superstructure check, and this tool does not do it. The "
+                    "numbers above are the demand to design them for.")
+                add("")
+
                 add("**Shaft capacity-design demand at this mechanism**")
                 add("")
                 add("The shaft is held elastic by design, so it does not "

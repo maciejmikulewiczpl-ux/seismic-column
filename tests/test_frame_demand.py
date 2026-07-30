@@ -143,3 +143,35 @@ def test_the_shaft_checks_are_unchanged_when_both_ends_are_free():
         for n in ("Column shear", "Shaft shear (capacity protection)"):
             assert (_named(named.directions[d].checks, n).demand
                     == pytest.approx(_named(plain.directions[d].checks, n).demand))
+
+
+# --- the deck is CAPACITY-PROTECTED, so it carries Mp like the top of shaft ---
+def test_the_deck_carries_the_columns_full_Mp():
+    """The deck and its joint are designed to resist Mo, not to yield first.
+
+    Capping the deck moment would move the plastic hinge into the
+    superstructure -- the same error as letting the shaft compete to hinge
+    below.  So both hinges sit at Mp_col and Vo = 2*Mo/H is the REQUIREMENT,
+    not a conservative choice that could be relaxed.
+    """
+    from seismic_column.frame_seismic import DECK, TOP_OF_SHAFT, _sections
+    g = Geometry(Hcol=18 * 12, D_shaft=84)
+    secs = {s.name: s for s in _sections(g, 2e9, 6e9, 3.0, 2e5, 6e5, "fixed")}
+    assert secs[DECK].Mp == pytest.approx(secs[TOP_OF_SHAFT].Mp)
+    assert secs[DECK].Mp == pytest.approx(2e5)
+
+
+def test_the_fixed_end_mechanism_shear_is_exactly_twice_the_cantilever():
+    a = _assess(fixity={LONGITUDINAL: "fixed"})
+    assert (a.directions[LONGITUDINAL].Vo
+            == pytest.approx(2.0 * a.directions[TRANSVERSE].Vo, rel=1e-9))
+
+
+def test_the_deck_capacity_protection_demand_is_reported():
+    """The engineer needs the Mo the deck must be designed for."""
+    a = _assess(fixity={LONGITUDINAL: "fixed"})
+    Mo = a.provisions.overstrength_factor * a.mc_col.Mp
+    # the interface moment the mechanism delivers, which the deck must resist
+    assert Mo > 0
+    assert (a.directions[LONGITUDINAL].Vo
+            == pytest.approx(2.0 * Mo / a.H_free, rel=1e-9))
