@@ -357,3 +357,16 @@ def test_a_longitudinal_pin_keeps_the_transverse_portal_and_its_couple():
     assert b.delta_P > 0.0                              # portal action survives
     assert b.positions[0].assessment.directions[TRANSVERSE].end_fixity == "fixed"
     assert b.positions[0].assessment.directions[LONGITUDINAL].end_fixity == "free"
+
+
+def test_a_pinned_transverse_bent_still_reports_its_shear_and_overturning():
+    """No couple does not mean no shear: the base moments take all of it.
+    Leaving V_bent/M_overturn at zero made the report state 'V_bent = 0 kip at
+    overstrength' beside a table of non-zero per-column Vo."""
+    b = evaluate_bent(3, 26 * 12.0, 2100.0, cap_fixity="pinned_trans", **_kw())
+    assert b.delta_P == 0.0                       # the point of pinning
+    one = b.positions[0].assessment
+    assert b.M_overturn == pytest.approx(3 * one.Mo)
+    assert b.V_bent == pytest.approx(3 * one.directions[TRANSVERSE].Vo)
+    # statics: with one hinge per column, V*H_free = sum(Mo)
+    assert b.V_bent * one.H_free == pytest.approx(b.M_overturn, rel=1e-6)

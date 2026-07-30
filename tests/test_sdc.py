@@ -83,3 +83,14 @@ def test_low_level_earthquake_elastic_check():
     lle_bad = next(c for c in a_bad.checks if "Low-level" in c.name)
     assert lle_ok.passed
     assert not lle_bad.passed
+
+
+def test_a_pass_fail_only_check_does_not_report_an_infinite_ratio():
+    """Checks with no numeric capacity (p-y stability reports a count of
+    unstable bounds against 0) passed while reporting ratio = inf, which wins
+    every 'worst ratio' aggregation.  Zero demand on zero capacity is 0."""
+    from seismic_column.sdc_capacity import Check
+    assert Check("p-y", 0, 0, True, "").ratio == 0.0
+    # a real demand against no capacity is still infinite -- a tension column
+    # has vc = 0 and must not look comfortable
+    assert Check("shear", 500.0, 0, False, "").ratio == float("inf")

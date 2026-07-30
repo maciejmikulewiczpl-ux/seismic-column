@@ -389,32 +389,61 @@ def column_report(rr: RowResult, view: str = "envelope") -> str:
     if bent is not None and bent.multi:
         add("## Bent — multiple columns")
         add("")
-        add(f"**{bent.n_columns} columns at {bent.spacing/12:.1f} ft centres.** "
-            "Transversely this is a portal frame, not a row of cantilevers, and "
-            "two things follow. The cap restrains the column heads, so each "
-            "column is **fixed-fixed** and develops the two-hinge mechanism "
-            "shear `2·Mp/H`. And pushing the bent overturns it, which is "
-            "resisted by an axial **couple** between the columns — so the same "
-            "section has a different `Mp`, `Vo`, `Df`, `Δy` and `Δc` at each "
-            "position.")
+        from .io_schema import head_moment_connection as _hmc
+        _cap = str(getattr(rr, "cap_fixity", "fixed") or "fixed")
+        _moment = _hmc(_cap, _TRANSVERSE)
+        add(f"**{bent.n_columns} columns at {bent.spacing/12:.1f} ft centres**, "
+            f"cap detail `{_cap}`.")
+        add("")
+        if _moment:
+            add("Transversely this is a portal frame, not a row of cantilevers, "
+                "and two things follow. The cap restrains the column heads, so "
+                "each column is **fixed-fixed** and develops the two-hinge "
+                "mechanism shear `2·Mp/H`. And pushing the bent overturns it, "
+                "which is resisted by an axial **couple** between the columns "
+                "— so the same section has a different `Mp`, `Vo`, `Df`, `Δy` "
+                "and `Δc` at each position.")
+        else:
+            add("The columns are **pinned to the cap transversely**, so the cap "
+                "carries no moment into them: each column is a **cantilever** "
+                "on the one-hinge mechanism `Mp/H`, and there is **no push/pull "
+                "couple** — statics alone gives `V·H = Σ Mo` with the base "
+                "moments taking all of it. Every column therefore sits at the "
+                "dead-load axial, and none of them goes into seismic tension. "
+                "The positions below are reported for completeness and are "
+                "identical by construction.")
+            add("")
+            add("This is a *choice*, not a saving: it must be detailed as a "
+                "genuine pin transversely, and the cap and joint designed for "
+                "it.")
         add("")
         add("Longitudinally there is no couple at all: the columns stand at one "
             "station, so they act as "
             f"{bent.n_columns} identical members in parallel at the dead-load "
             "axial, with the end condition `deck_link` gives.")
         add("")
-        _eq(add, "Overturning taken by the couple", "Σ Mo_i",
-            " + ".join(f"{p.assessment.Mo/12:.0f}" for p in bent.positions),
-            f"{bent.M_overturn/12:.0f} kip-ft",
-            ref="cut at the top of shaft: V_bent·H_free = Σ ΔP·x + Σ Mo, and "
-                "V_bent = Σ 2·Mo/H_free, so the couple carries Σ Mo — the "
-                "column base moments take the other half")
-        _eq(add, "Axial couple", "ΔPᵢ = M_ot · xᵢ / Σxⱼ²",
-            f"{bent.M_overturn/12:.0f} · x / Σx²",
-            f"±{bent.delta_P:.0f} kip",
-            ref="linear (plane-sections) distribution; sums to zero, so it adds "
-                "no net axial to the bent")
-        add(f"- **V_bent** = Σ Voᵢ = **{bent.V_bent:.0f} kip** at overstrength")
+        if _moment:
+            _eq(add, "Overturning taken by the couple", "Σ Mo_i",
+                " + ".join(f"{p.assessment.Mo/12:.0f}" for p in bent.positions),
+                f"{bent.M_overturn/12:.0f} kip-ft",
+                ref="cut at the top of shaft: V_bent·H_free = Σ ΔP·x + Σ Mo, and "
+                    "V_bent = Σ 2·Mo/H_free, so the couple carries Σ Mo — the "
+                    "column base moments take the other half")
+            _eq(add, "Axial couple", "ΔPᵢ = M_ot · xᵢ / Σxⱼ²",
+                f"{bent.M_overturn/12:.0f} · x / Σx²",
+                f"±{bent.delta_P:.0f} kip",
+                ref="linear (plane-sections) distribution; sums to zero, so it "
+                    "adds no net axial to the bent")
+        else:
+            _eq(add, "Overturning, taken entirely by the base moments",
+                "Σ Mo_i",
+                " + ".join(f"{p.assessment.Mo/12:.0f}" for p in bent.positions),
+                f"{bent.M_overturn/12:.0f} kip-ft",
+                ref="a transverse pin carries no moment into the column head, so "
+                    "the base moments resist all the overturning and nothing is "
+                    "left for an axial couple: ΔP = 0")
+        add(f"- **V_bent** = Σ Voᵢ = **{bent.V_bent:.0f} kip** at overstrength "
+            f"({'two hinges' if _moment else 'one hinge'} per column)")
         add("")
         add("| Position | x (ft) | ΔP (kip) | P (kip) | Mp (kip-ft) | Vo (kip) "
             "| Df (ft) | Δy (in) | Δc (in) | Δd (in) | Δc/Δd | |")
@@ -431,12 +460,15 @@ def column_report(rr: RowResult, view: str = "envelope") -> str:
                 f"| {g.demand.disp_demand:.2f} | **{r:.2f}** "
                 f"| {'NET TENSION ⚠' if p.net_tension else ''} |")
         add("")
-        add(f"The checks below are the **envelope** over the positions "
-            f"(transverse) and the dead-load run (longitudinal); "
-            f"**{bent.governing.label}** governs the displacement capacity. "
-            f"The push/pull "
-            f"{'converged' if bent.converged else 'did NOT converge'} in "
-            f"{bent.iterations} pass(es).")
+        _envelope = (f"The checks below are the **envelope** over the positions "
+                     f"(transverse) and the dead-load run (longitudinal); "
+                     f"**{bent.governing.label}** governs the displacement "
+                     f"capacity.")
+        if _moment:
+            _envelope += (f" The push/pull "
+                          f"{'converged' if bent.converged else 'did NOT converge'}"
+                          f" in {bent.iterations} pass(es).")
+        add(_envelope)
         add("")
         for m in bent.log:
             add(f"- {m}")
@@ -810,8 +842,17 @@ def balance_report(balance) -> str:
                f"{b.mass_trans:.3f} | {b.stiffness(LONGITUDINAL, 0):.1f} | "
                f"{b.stiffness(TRANSVERSE, 0):.1f} |")
         for i in range(n_b):
-            row += (f" {b.k[i]:.2f} |" if i < len(b.k) else " — |")
+            # per BENT, like the two columns before it -- b.k is stored per
+            # column, and printing it raw makes a 3-column bent read a third of
+            # its own stiffness with nothing to say why
+            row += (f" {b.n_columns * b.k[i]:.2f} |" if i < len(b.k) else " — |")
         add(row)
+    add("")
+    add("All stiffnesses are **per bent**: the columns of a bent act in "
+        "parallel, so a bent is `n` times one column. The per-bound `k` "
+        "columns are the fixed-free value; `k long.`/`k trans.` apply each "
+        "direction's real end condition, so they are four times as stiff "
+        "wherever the head is restrained.")
     add("")
 
     # ------------------------------------------------------------------

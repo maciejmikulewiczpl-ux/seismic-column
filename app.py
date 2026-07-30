@@ -24,6 +24,7 @@ from seismic_column.batch import (RowResult, results_to_dataframe,
                                   run_batch_balanced)
 from seismic_column.demand import SpectrumSpec
 from seismic_column.io_schema import (
+    CAP_FIXITIES,
     COLUMNS,
     COLUMN_META,
     GlobalConfig,
@@ -619,6 +620,11 @@ for c in COLUMNS:
     if c == "deck_link":
         col_config[c] = st.column_config.SelectboxColumn(
             label, help=help_txt, options=list(DECK_LINKS), required=False)
+    elif c == "cap_fixity":
+        # a fixed vocabulary like deck_link -- as free text a typo only
+        # surfaced at validate(), after the whole table was filled in
+        col_config[c] = st.column_config.SelectboxColumn(
+            label, help=help_txt, options=list(CAP_FIXITIES), required=False)
     elif c in TEXT_COLUMNS:
         col_config[c] = st.column_config.TextColumn(label, help=help_txt)
     elif c in INT_COLS:

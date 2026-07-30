@@ -173,8 +173,15 @@ def evaluate_bent(n_columns: int, spacing: float, axial: float,
         xs0 = offsets(n_columns, spacing)
         poss = [ColumnPosition(i, x, 0.0, P_dead, a)
                 for i, x in enumerate(xs0)]
+        # There is no couple, but the bent still develops a shear and still
+        # overturns -- the base moments simply take all of it.  Leaving these
+        # at zero made the report state "V_bent = 0 kip at overstrength" beside
+        # a table of non-zero per-column Vo.
+        _dt = a.directions.get(TRANSVERSE)
         return BentAssessment(
             n_columns, spacing, poss, list(a.checks), poss[0],
+            V_bent=n_columns * (_dt.Vo if _dt is not None else 0.0),
+            M_overturn=n_columns * a.Mo,
             converged=True, iterations=0,
             log=[f"{n_columns} columns at {spacing/12:.1f} ft, PINNED transversely at "
                  f"cap: each column is an independent cantilever, so there is "

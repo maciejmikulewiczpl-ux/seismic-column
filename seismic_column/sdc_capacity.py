@@ -60,7 +60,11 @@ class Check:
     @property
     def ratio(self) -> float:
         if self.capacity == 0:
-            return float("inf")
+            # Nothing demanded against nothing is not an infinite utilisation --
+            # the pass/fail-only checks (e.g. p-y stability, which reports a
+            # count against no capacity) would otherwise report inf while
+            # passing, and win every "worst ratio" aggregation.
+            return float("inf") if self.demand else 0.0
         return self.demand / self.capacity
 
 
