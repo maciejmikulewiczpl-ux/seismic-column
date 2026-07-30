@@ -1076,9 +1076,22 @@ if "summary" in st.session_state:
                 f"from one bent. Balanced *stiffness* only applies inside a "
                 f"**continuous** frame; balanced *geometry* applies between "
                 f"adjacent frames everywhere.")
+            st.caption(
+                "A bent shown in **[brackets]** sits under an expansion joint, "
+                "so it carries the last span of one frame and the first span of "
+                "the next. It appears in **both** frames with its FULL stiffness "
+                "in each (a rigid deck leans on the whole bent) and HALF its "
+                "tributary mass — the half-span belonging to that deck. "
+                "A bent on a released bearing carries no deck longitudinally, "
+                "so it is absent from the longitudinal frames entirely; its own "
+                "seismic checks still run on its own period.")
             frame_rows = []
             for f in frames:
-                row = {"frame": f.key, "bents": " + ".join(f.names),
+                bents_txt = " + ".join(f"[{n}]" if f.shared(n) else n
+                                       for n in f.names)
+                shared = [n for n in f.names if f.shared(n)]
+                row = {"frame": f.key, "bents": bents_txt,
+                       "joint bents (½ mass)": ", ".join(shared) or "—",
                        "continuous": "yes" if f.continuous else "—",
                        "end_condition": f.end_conditions,
                        "M_kip_s2_in": round(f.M(), 3)}

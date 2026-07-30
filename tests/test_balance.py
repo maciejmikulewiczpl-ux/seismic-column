@@ -806,8 +806,10 @@ def test_continuous_frame_end_to_end():
     b = out.balance
     lon = [f.names for f in b.frames[LONGITUDINAL]]
     tra = [f.names for f in b.frames[TRANSVERSE]]
-    # C2/C4 are released longitudinally, so C3 is alone in the frame there
-    assert ("C3",) in lon and ("C2",) in lon and ("C4",) in lon
+    # C2/C4 are released longitudinally: they carry no deck that way, so they
+    # leave the longitudinal model entirely and C3 is alone in the frame there
+    assert ("C3",) in lon
+    assert not any({"C2", "C4"} & set(names) for names in lon)
     assert ("C2", "C3", "C4") in tra
     # the stiffness rule fires only transversely, where the frame is continuous
     assert not any(c.name in (STIFFNESS_CHECK, STIFFNESS_ANY_CHECK)

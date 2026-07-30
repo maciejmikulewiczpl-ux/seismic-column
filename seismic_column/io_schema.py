@@ -148,7 +148,12 @@ COLUMN_META: dict[str, tuple[str, str]] = {
               "Groups piers for the balanced-stiffness and balanced-geometry "
               "checks. Piers sharing a frame are compared in TABLE ROW ORDER, "
               "so consecutive rows are treated as adjacent. Leave blank or "
-              "enter '-' to exclude this pier from those checks."),
+              "enter '-' to exclude this pier from those checks. A pier on a "
+              "'bearing' at the END of a continuous frame ALSO joins the "
+              "neighbouring frame automatically: an expansion joint means both "
+              "decks bear on the same cap, so it carries the last span of one "
+              "frame and the first span of the next. You name one frame here; "
+              "the other is derived."),
     "n_columns": ("Columns in bent",
                   "How many columns this bent carries (1 = single-column). More "
                   "than one makes the bent a PORTAL FRAME transversely: the cap "
@@ -207,7 +212,11 @@ COLUMN_META: dict[str, tuple[str, str]] = {
                          "Tributary weight this bent restrains TRANSVERSELY. "
                          "Shear keys engage a bent transversely even where the "
                          "bearing is released longitudinally, so this normally "
-                         "includes half of each adjacent span. Blank = same as "
+                         "includes half of each adjacent span. At an expansion "
+                         "joint those two half-spans belong to DIFFERENT frames, "
+                         "and the balance checks split this figure 50/50 between "
+                         "them - exact where the adjacent spans match, "
+                         "approximate where they do not. Blank = same as "
                          "the longitudinal weight. Used by the balance checks "
                          "only."),
     "deck_link": ("Deck connection",
@@ -217,7 +226,11 @@ COLUMN_META: dict[str, tuple[str, str]] = {
                   "restrained both ways but no moment, fixed-free both ways - "
                   "the normal simply supported case, and the default. "
                   "'bearing' = released longitudinally with a shear key, so it "
-                  "resists transversely only. 'free' = resists neither. Drives "
+                  "resists transversely only - it carries NO deck longitudinally "
+                  "(only its own cap and column self weight), so it takes no part "
+                  "in the LONGITUDINAL balance checks at all, and transversely it "
+                  "splits its tributary mass 50/50 with the frame across the "
+                  "joint. 'free' = resists neither. Drives "
                   "both the frame layout and the end condition in each "
                   "direction."),
     "axial_kip": ("Axial load P (kip)",

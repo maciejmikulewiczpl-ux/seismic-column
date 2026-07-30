@@ -804,8 +804,12 @@ def balance_report(balance) -> str:
             sep += "--:|--:|"
         add(hdr)
         add(sep)
+        shown_share = False
         for f in frames:
-            row = (f"| {f.key} | {' + '.join(f.names)}"
+            names = " + ".join(f"**[{n}]**" if f.shared(n) else n
+                               for n in f.names)
+            shown_share |= any(f.shared(n) for n in f.names)
+            row = (f"| {f.key} | {names}"
                    f"{' *(continuous)*' if f.continuous else ''} "
                    f"| {f.end_conditions} | {f.M():.3f} |")
             for i in range(n_b):
@@ -815,6 +819,15 @@ def balance_report(balance) -> str:
                     row += " — | — |"
             add(row)
         add("")
+        if shown_share:
+            add("A bent in **[brackets]** sits under an expansion joint: it "
+                "carries the last span of one frame and the first span of the "
+                "next, so it appears in BOTH with its full stiffness in each "
+                "and half its tributary mass. A bent on a released bearing "
+                "carries no deck longitudinally and is absent from the "
+                "longitudinal frames entirely — its own seismic checks still "
+                "run, on its own period.")
+            add("")
 
         # --- worked derivation for every CONTINUOUS frame in this direction ---
         for f in frames:
