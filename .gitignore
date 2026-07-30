@@ -22,3 +22,7 @@ seismic_project_EN_*.json
 EN_*.json
 EN_findings.md
 frame_check_EN*.md
+seismic_project_B*.json
+frame_check_*.md
+sweep.json
+search*.json
