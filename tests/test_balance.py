@@ -828,7 +828,9 @@ def test_continuous_frame_end_to_end():
 def test_validate_backfills_frame_and_silo_for_older_tables():
     df = default_dataframe(2).drop(columns=["frame", "silo_ft"])
     out = validate(df)
-    assert list(out["frame"]) == ["F1", "F1"]     # one run of piers in series
+    # nothing was said about how the decks sit, so the safe reading is simply
+    # supported spans -- one frame per bent, not one continuous deck
+    assert list(out["frame"]) == ["F1", "F2"]
     assert list(out["silo_ft"]) == [0.0, 0.0]
 
 

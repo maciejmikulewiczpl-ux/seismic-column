@@ -672,7 +672,21 @@ def validate(df: pd.DataFrame, min_shaft_oversize: float = 0.0,
             # weight_trans_kip must fall back to the LONGITUDINAL weight of the
             # same row, not to a starter constant, so leave it blank for the
             # fillna below to resolve.
-            df[col] = float("nan") if col == "weight_trans_kip" else defaults[col]
+            if col == "weight_trans_kip":
+                df[col] = float("nan")
+            elif col == "frame":
+                # No frame column means nothing has been said about how the
+                # decks sit, and simply supported spans are the safe reading --
+                # one frame per bent, exactly as default_dataframe writes them.
+                # Putting every bent in ONE frame instead would assert a
+                # continuous deck nobody declared, and with the default pinned
+                # bearings would read as a span pinned at both ends.
+                df[col] = [f"F{i + 1}" for i in range(len(df))]
+                df.attrs["migrations"] = df.attrs["migrations"] + [
+                    "Table has no `frame` column, so every bent was given its "
+                    "own frame (simply supported spans)."]
+            else:
+                df[col] = defaults[col]
     df = df[list(COLUMNS)]
 
     # ``frame`` groups piers into a frame for the balance checks.  A blank CELL
@@ -698,6 +712,30 @@ def validate(df: pd.DataFrame, min_shaft_oversize: float = 0.0,
                 f"{nm}: deck_link lists {nl} link(s) but frame lists {nf} "
                 f"frame(s) — give one link per frame, in the same order, or a "
                 f"single link for all of them")
+    # Every deck needs exactly the right longitudinal restraint.  A simply
+    # supported span is pinned at ONE end and rollered at the other: pin-pin
+    # locks it against temperature and is not built, and roller-roller leaves
+    # it unrestrained.  A continuous frame is held by its integral bents, so
+    # free bearings at both ends of it are perfectly normal.
+    _members: dict[str, list[tuple[str, str]]] = {}
+    for nm, fr, lk in zip(df["name"], df["frame"], df["deck_link"]):
+        keys = frame_keys(fr)
+        for key, link in zip(keys, deck_links(lk, len(keys))):
+            _members.setdefault(key, []).append((str(nm), link))
+    for key, mem in _members.items():
+        holds = [n for n, l in mem if l in ("pinned", "integral")]
+        pins = [n for n, l in mem if l == "pinned"]
+        if not holds:
+            raise ValueError(
+                f"Frame {key!r} has no longitudinal restraint — every support "
+                f"({', '.join(n for n, _ in mem)}) is a roller. A deck needs a "
+                f"pin at one support, or an integral bent.")
+        if len(mem) == 2 and len(pins) == 2:
+            raise ValueError(
+                f"Frame {key!r} is pinned at BOTH supports ({pins[0]} and "
+                f"{pins[1]}). A simply supported span takes a pin at one end "
+                f"and a roller at the other.")
+
     # A silo is optional everywhere; blank = none.
     df["silo_ft"] = pd.to_numeric(df["silo_ft"], errors="coerce").fillna(0.0)
     # A bent is single-column unless told otherwise, which is exactly what every
