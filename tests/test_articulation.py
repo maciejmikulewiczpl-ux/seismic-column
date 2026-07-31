@@ -100,12 +100,6 @@ def test_a_span_pinned_at_both_ends_is_rejected():
         validate(_two_span(["pin", "pin, pin", "roller"]))
 
 
-def test_a_span_on_two_rollers_is_rejected():
-    from seismic_column.io_schema import validate
-    with pytest.raises(ValueError, match="no longitudinal restraint"):
-        validate(_two_span(["roller", "roller, pin", "roller"]))
-
-
 def test_pin_one_end_roller_the_other_is_accepted():
     from seismic_column.io_schema import validate
     out = validate(_two_span(["pin", "roller, pin", "roller"]))
@@ -119,3 +113,23 @@ def test_free_bearings_at_both_ends_of_a_CONTINUOUS_frame_are_fine():
     df["frame"] = "C1"
     df["deck_link"] = ["roller", "integral", "integral", "roller"]
     validate(df)
+
+
+def test_an_END_deck_may_roller_both_supports():
+    """The last span is held at the abutment, which is not in the table, so
+    rollers at both of its in-model supports is legitimate."""
+    from seismic_column.io_schema import default_dataframe, validate
+    df = default_dataframe(3)
+    df["frame"] = ["S1", "S1, S2", "S2"]
+    df["deck_link"] = ["pin", "roller, roller", "roller"]   # S2 has no pin
+    out = validate(df)
+    assert any("abutment" in m for m in out.attrs["migrations"])
+
+
+def test_an_INTERIOR_deck_may_not():
+    from seismic_column.io_schema import default_dataframe, validate
+    df = default_dataframe(4)
+    df["frame"] = ["S1", "S1, S2", "S2, S3", "S3"]
+    df["deck_link"] = ["pin", "roller, roller", "roller, pin", "roller"]
+    with pytest.raises(ValueError, match="no longitudinal restraint"):
+        validate(df)

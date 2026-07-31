@@ -722,14 +722,26 @@ def validate(df: pd.DataFrame, min_shaft_oversize: float = 0.0,
         keys = frame_keys(fr)
         for key, link in zip(keys, deck_links(lk, len(keys))):
             _members.setdefault(key, []).append((str(nm), link))
+    # The FIRST and LAST decks may be held at an abutment that is not in the
+    # table, so rollers at both of their in-model supports is legitimate.  An
+    # interior deck has no such excuse.
+    _order = {nm: i for i, nm in enumerate(df["name"])}
+    _first = min(_members, key=lambda k: min(_order[n] for n, _ in _members[k]))
+    _last = max(_members, key=lambda k: max(_order[n] for n, _ in _members[k]))
     for key, mem in _members.items():
         holds = [n for n, l in mem if l in ("pinned", "integral")]
         pins = [n for n, l in mem if l == "pinned"]
-        if not holds:
+        if not holds and key not in (_first, _last):
             raise ValueError(
                 f"Frame {key!r} has no longitudinal restraint — every support "
                 f"({', '.join(n for n, _ in mem)}) is a roller. A deck needs a "
                 f"pin at one support, or an integral bent.")
+        if not holds:
+            df.attrs["migrations"] = df.attrs["migrations"] + [
+                f"Frame {key!r} rollers both its supports "
+                f"({', '.join(n for n, _ in mem)}); as an end deck it is taken "
+                f"to be held longitudinally at the abutment, which is outside "
+                f"the table."]
         if len(mem) == 2 and len(pins) == 2:
             raise ValueError(
                 f"Frame {key!r} is pinned at BOTH supports ({pins[0]} and "
