@@ -1351,3 +1351,62 @@ def test_engineer_vocabulary_is_accepted_for_deck_links():
     assert deck_links("fixed", 1) == ("pinned",)
     assert deck_link_word("bearing") == "roller (expansion)"
     assert deck_link_word("pinned") == "pin (fixed bearing)"
+
+
+# --- changing a bearing must change what gets CHECKED ----------------------
+def _flip(a7_back):
+    """A7 sits between a simple span (F1) and a continuous frame (F2).
+    ``a7_back`` is how it meets F1 -- flip it and the longitudinal model
+    must change with it."""
+    return [_bent("A6", [100.0], m=2.0, frame="F1", order=0,
+                  deck_link="pinned"),
+            _bent("A7", [120.0], m=3.0, frame="F1, F2", order=1,
+                  deck_link=f"{a7_back}, bearing"),
+            _bent("A8", [110.0], m=2.0, frame="F2", order=2,
+                  deck_link="integral"),
+            _bent("A9", [130.0], m=2.0, frame="F2", order=3,
+                  deck_link="integral")]
+
+
+def test_a_roller_roller_bent_is_out_of_the_longitudinal_model():
+    lon = {f.key: f.names for f in frames_for(_flip("bearing"), LONGITUDINAL)}
+    assert not any("A7" in n for n in lon.values())
+    assert lon["F1"] == ("A6",)          # F1 held by its pin alone
+    assert lon["F2"] == ("A8", "A9")     # C1 held by its integral bents
+
+
+def test_flipping_that_roller_to_a_PIN_brings_it_back_in():
+    """The whole point: the bearing arrangement drives the checks, so a change
+    here must show up in the longitudinal model without touching anything else."""
+    lon = {f.key: f.names for f in frames_for(_flip("pinned"), LONGITUDINAL)}
+    assert lon["F1"] == ("A6", "A7")     # now TWO supports resist here
+    assert lon["F2"] == ("A8", "A9")     # F2 unchanged: A7 still rollers it
+
+
+def test_the_flip_leaves_the_TRANSVERSE_model_alone():
+    """Pin and roller are both shear-keyed, so transversely they are the same
+    -- a flip must not move a transverse number."""
+    a = {f.key: f.names for f in frames_for(_flip("bearing"), TRANSVERSE)}
+    b = {f.key: f.names for f in frames_for(_flip("pinned"), TRANSVERSE)}
+    assert a == b == {"F1": ("A6", "A7"), "F2": ("A7", "A8", "A9")}
+    ma = {f.key: f.M() for f in frames_for(_flip("bearing"), TRANSVERSE)}
+    mb = {f.key: f.M() for f in frames_for(_flip("pinned"), TRANSVERSE)}
+    assert ma == mb
+
+
+def test_the_flip_changes_which_LONGITUDINAL_checks_are_raised():
+    """Downstream of the frames: with A7 out, F1 is a single-bent frame and
+    only its period is compared.  Pin it and F1 becomes a two-support span,
+    which the simple-span switch can then reach."""
+    crit_on = BalanceCriteria(simple_span_stiffness=True)
+    off = _long(balance_checks(_flip("bearing"), crit_on), STIFFNESS_CHECK)
+    on = _long(balance_checks(_flip("pinned"), crit_on), STIFFNESS_CHECK)
+    assert [c.pair for c in off] == [("A8", "A9")]              # F2 only
+    assert ("A6", "A7") in [c.pair for c in on]                 # F1 now too
+    # and the geometry pair F1-F2 exists either way, on different periods
+    g_off = [c for c in _long(balance_checks(_flip("bearing"), BalanceCriteria()),
+                     GEOMETRY_CHECK)]
+    g_on = [c for c in _long(balance_checks(_flip("pinned"), BalanceCriteria()),
+                    GEOMETRY_CHECK)]
+    assert [c.pair for c in g_off] == [c.pair for c in g_on] == [("F1", "F2")]
+    assert g_off[0].ratio != pytest.approx(g_on[0].ratio)
