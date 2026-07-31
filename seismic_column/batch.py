@@ -956,10 +956,9 @@ def _balance_stage(results: list[RowResult], rows_by_name: dict[str, pd.Series],
         result.converged = True
 
     # The search has now done everything it can.  A BETWEEN-FRAME geometry pair
-    # still short at this point is not a design failure to be beaten out with a
-    # deeper silo -- the balance rules exist to let a bridge AVOID a more
-    # rigorous analysis, and where they cannot be met the code's own route is
-    # nonlinear time-history (SDC 7.1.3 / SGS 4.1.3).  So it is referred there.
+    # still short is REFERRED, not cleared: SDC C7.1.3 says "the use of NTHA is
+    # not by itself a justification to waive the requirement of balanced frame
+    # geometry", so accepting one is a project-criteria decision for the owner.
     #
     # WITHIN-FRAME stiffness is deliberately NOT referred: that rule governs how
     # the frame distributes demand between its own members, and a time-history
@@ -975,9 +974,11 @@ def _balance_stage(results: list[RowResult], rows_by_name: dict[str, pd.Series],
             f"by practical means at {len(unresolved_geo)} pair(s) "
             f"({', '.join(pairs)}). The silo search pursued it and stopped; "
             f"closing it further would need silo depths or diameter changes "
-            f"beyond what the search could reach. Per SDC 7.1.3 / SGS 4.1.3 "
-            f"this is cleared by nonlinear time-history analysis, not by "
-            f"forcing the ratio. The WITHIN-frame stiffness rules are still "
+            f"beyond what the search could reach. NOTE: SDC C7.1.3 states "
+            f"that nonlinear time-history is NOT by itself a justification to "
+            f"waive balanced frame geometry — accepting these against a "
+            f"time-history run is a PROJECT-CRITERIA decision for the owner, "
+            f"not a code allowance. The WITHIN-frame stiffness rules are still "
             f"enforced and are reported separately.")
 
     if not result.passed:

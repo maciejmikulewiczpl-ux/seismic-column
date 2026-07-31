@@ -334,11 +334,13 @@ class BalanceCheck:
     ref: str = ""
     note: str = ""
     # Set only on a BETWEEN-FRAME geometry check that the silo search pursued
-    # and could not close by practical means.  The balance rules exist to let a
-    # bridge AVOID a more rigorous analysis (SDC 7.1.3 / SGS 4.1.3); where they
-    # cannot be met, the code's own route is nonlinear time-history, not an
-    # unbuildable silo.  A WITHIN-frame stiffness shortfall never gets this --
-    # that rule governs how the frame itself behaves and has to be satisfied.
+    # and could not close by practical means.  This is a REFERRAL, not a
+    # clearance: SDC C7.1.3 states plainly that "the use of NTHA is not by
+    # itself a justification to waive the requirement of balanced frame
+    # geometry".  Accepting a shortfall against a time-history run is a
+    # PROJECT-CRITERIA decision for the owner, so the tool flags it and leaves
+    # the judgement where it belongs.  A WITHIN-frame stiffness shortfall never
+    # gets this -- that rule governs how the frame itself behaves.
     tha_required: bool = False
 
     @property

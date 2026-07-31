@@ -965,10 +965,14 @@ def balance_report(balance) -> str:
             add(f"| {c.pair[0]}–{c.pair[1]} | {c.direction} | {c.bound} "
                 f"| {c.ratio:.3f} | {c.limit:.2f} | {c.note} |")
         add("")
-        add("Per SDC §7.1.3 / SGS §4.1.3 these are cleared by **nonlinear "
-            "time-history analysis**, not by forcing the ratio. The balance "
-            "rules exist to let a bridge *avoid* a more rigorous analysis; "
-            "where they cannot be met, that analysis is the code's own route.")
+        add("These are **referred, not cleared**. SDC §C7.1.3 states that "
+            "*\"the use of NTHA is not by itself a justification to waive the "
+            "requirement of balanced frame geometry\"*, so accepting a "
+            "shortfall against a time-history run is a **project-criteria "
+            "decision for the owner**, not a code allowance. The balance rules "
+            "exist to let a bridge *avoid* a more rigorous analysis; where they "
+            "cannot be met, the shortfall and its magnitude are stated here so "
+            "the decision is made explicitly.")
         add("")
         add("**The within-frame stiffness rules are NOT referred here and "
             "remain enforced.** That rule governs how a frame distributes "
