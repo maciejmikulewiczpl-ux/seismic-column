@@ -23,6 +23,11 @@ EN_*.json
 EN_findings.md
 frame_check_EN*.md
 seismic_project_B*.json
+# structure A / the articulated EN files -- the B wildcard
+# covered its counterparts but nothing covered these, so they
+# sat untracked rather than ignored and one `git add -A` away
+# from being committed
+seismic_project_A*.json
 frame_check_*.md
 sweep.json
 search*.json
