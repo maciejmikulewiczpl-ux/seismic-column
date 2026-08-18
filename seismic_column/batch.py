@@ -339,9 +339,14 @@ def run_batch_balanced(df: pd.DataFrame, cfg: GlobalConfig,
     # and still fail its own shear check, because Vo = n*Mo/H_free and a short
     # column simply develops too much of it.  Size those silos FIRST so the
     # balance search starts from depths that are already necessary.
+    #
+    # A silo is a design change (it lengthens the free column), so it is only
+    # added when the engineer has authorised auto-siloing.  With that off the
+    # entered geometry is left exactly as typed and the shortfall is reported,
+    # not silently fixed — matching the "no silos, results unchanged" contract.
     shear_floors: dict = {}
     shear_log: list[str] = []
-    if results:
+    if results and cfg.balance_check and cfg.balance_auto_silo:
         shear_floors, shear_log = _shear_silo_floors(
             results, rows_by_name, order, cfg, on_candidate=on_candidate,
             on_status=balance_progress)
