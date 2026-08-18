@@ -633,12 +633,10 @@ def _frame_basis(results: list[RowResult], order: dict[str, int],
             n = f.n_bounds
             if n < 1:            # nothing solved for this frame yet
                 continue
-            # Keyed by bound LABEL, not index: bent_stiffness collapses
-            # duplicate bounds, so a positional list would misalign with the
-            # full bound set evaluate_column solves and silently leave the
-            # extra bounds on their stand-alone demand.
-            lbls = f.members[0].bound_labels
-            basis = {lbls[i]: (f.K(i), f.M() * G_IN_S2) for i in range(n)}
+            # (K, W) the frame imposes at each fixity bound, indexed the way
+            # evaluate_column steps its bounds.  Bound i is the same fixity
+            # bracket for every member, so the mapping is positional.
+            KW = [(f.K(i), f.M() * G_IN_S2) for i in range(n)]
             # A boundary bent belongs to two frames.  Take the one that governs
             # it -- the LONGER period, since displacement capacity is what these
             # bents fail on and spectral displacement grows with T.  (Shear is
@@ -650,7 +648,15 @@ def _frame_basis(results: list[RowResult], order: dict[str, int],
                         (b.name, direction), -1.0):
                     continue
                 _softness[(b.name, direction)] = soft
-                d_basis[direction] = basis
+                # Key by THIS member's OWN bound labels, not members[0]'s: the
+                # members of a frame can carry different fixity multipliers, so
+                # a single shared label set misses every member whose multiplier
+                # differs and silently reverts it to its stand-alone period
+                # instead of the frame's (bent_stiffness collapses duplicate
+                # bounds, so label-keyed lookup stays robust to that too).
+                lbls = b.bound_labels
+                d_basis[direction] = {lbls[i]: KW[i]
+                                      for i in range(min(n, len(lbls)))}
                 d_fix[direction] = b.end_fixity(direction)
     return out
 
