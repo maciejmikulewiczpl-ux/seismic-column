@@ -1153,11 +1153,67 @@ if "summary" in st.session_state:
                        "continuous": "yes" if f.continuous else "—",
                        "end_condition": f.end_conditions,
                        "M_kip_s2_in": round(f.M(), 3)}
+                # Number the columns by fixity BOUND, not by a multiplier: the
+                # depth to fixity is per MEMBER (each bent sits on its own
+                # foundation), so a single multiplier label misreads the frame
+                # total as one bent's value.  The per-member multipliers live
+                # in the header tooltip instead.
                 for i in range(f.n_bounds):
-                    row[f"K [{f.label(i)}]"] = round(f.K(i), 2)
-                    row[f"T [{f.label(i)}]"] = round(f.T(i), 3)
+                    row[f"K_frame [bound {i + 1}] (kip/in)"] = round(f.K(i), 2)
+                    row[f"T_frame [bound {i + 1}] (s)"] = round(f.T(i), 3)
                 frame_rows.append(row)
-            st.dataframe(pd.DataFrame(frame_rows), width="stretch")
+            _max_bounds = max((f.n_bounds for f in frames), default=0)
+            _col_cfg = {
+                "frame": st.column_config.TextColumn(
+                    help="Frame id from the batch table's `frame` column. The "
+                         "bents naming it act together in this direction."),
+                "bents": st.column_config.TextColumn(
+                    help="Members of the frame. A bent in [brackets] sits under "
+                         "an expansion joint and belongs to two frames — full "
+                         "stiffness in each, half its mass in each."),
+                "joint bents (½ mass)": st.column_config.TextColumn(
+                    help="Boundary bents carrying two decks: they enter this "
+                         "frame's mass at half (the half-span belonging to this "
+                         "deck) but their full stiffness."),
+                "continuous": st.column_config.TextColumn(
+                    help="'yes' when more than one bent acts together, so the "
+                         "balanced-stiffness rule applies inside the frame."),
+                "end_condition": st.column_config.TextColumn(
+                    help="Column-head restraint of the members in this "
+                         "direction: fixed-fixed for an integral (moment-"
+                         "connected) bent longitudinally, fixed-free otherwise "
+                         "and for every bent transversely."),
+                "M_kip_s2_in": st.column_config.NumberColumn(
+                    "M_frame (kip·s²/in)",
+                    help="Frame tributary mass M_frame = Σ mᵢ over the members "
+                         "(a boundary bent enters at half). Each mᵢ is the "
+                         "entered tributary weight for this direction plus the "
+                         "participating column self-weight over H_free, divided "
+                         "by g. Excludes the embedded shaft."),
+            }
+            for i in range(_max_bounds):
+                _col_cfg[f"K_frame [bound {i + 1}] (kip/in)"] = \
+                    st.column_config.NumberColumn(
+                        help=(
+                            "Frame lateral stiffness at fixity bound "
+                            f"{i + 1}: K_frame = Σ kᵢ, the members added as "
+                            "springs in parallel under the rigid deck. Each kᵢ "
+                            "is that bent's OWN stiffness, evaluated at its OWN "
+                            "depth to fixity (Df = multiplier × D_shaft, which "
+                            "differs bent to bent) and its OWN end condition "
+                            "(integral = fixed-fixed longitudinally ≈ up to 4× "
+                            "the fixed-free value). It is NOT the frame taken at "
+                            "one shared multiplier."))
+                _col_cfg[f"T_frame [bound {i + 1}] (s)"] = \
+                    st.column_config.NumberColumn(
+                        help=(
+                            "Frame period at fixity bound "
+                            f"{i + 1}: T = 2π·√(M_frame / K_frame), the rigid-"
+                            "deck SDOF period the members share. Uses the single "
+                            "frame K and M in the columns to the left — not any "
+                            "one member's stiffness."))
+            st.dataframe(pd.DataFrame(frame_rows), width="stretch",
+                         column_config=_col_cfg)
 
         if balance.bents:
             bent_rows = []

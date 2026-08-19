@@ -799,8 +799,7 @@ def balance_report(balance) -> str:
         hdr = "| Frame | Bents | End condition | M (kip·s²/in) |"
         sep = "|:--|:--|:--|--:|"
         for i in range(n_b):
-            lbl = balance.bents[0].label(i) if balance.bents else f"bound {i+1}"
-            hdr += f" K [{lbl}] (kip/in) | T [{lbl}] (s) |"
+            hdr += f" K_frame [bound {i+1}] (kip/in) | T_frame [bound {i+1}] (s) |"
             sep += "--:|--:|"
         add(hdr)
         add(sep)
@@ -841,23 +840,30 @@ def balance_report(balance) -> str:
                 f"and their stiffnesses add.")
             add("")
             for i in range(f.n_bounds):
-                lbl = f.label(i)
-                add(f"**Fixity bound: {lbl}**")
+                # Number the bound, and spell out that the "multiplier" is
+                # per MEMBER (each bent on its own foundation), not one value
+                # shared by the frame -- the exact point that misreads as a
+                # per-multiplier stiffness.
+                per_member = ", ".join(f"{b.name} {b.bound_labels[i]}"
+                                       for b in f.members)
+                add(f"**Fixity bound {i+1}** — depth to fixity is per member "
+                    f"(Df = multiplier × D_shaft): {per_member}.")
                 add("")
                 ks = " + ".join(f"{b.stiffness(direction, i):.2f}"
                                 for b in f.members)
                 ms = " + ".join(f"{b.mass(direction):.3f}" for b in f.members)
-                _eq(add, f"K_frame [{lbl}]", "Σ kᵢ  over the members that resist",
+                _eq(add, f"K_frame [bound {i+1}]",
+                    "Σ kᵢ  (members added as springs in parallel)",
                     ks, f"{f.K(i):.2f} kip/in",
-                    ref=f"members: {', '.join(f.names)} — each at its own end "
-                        f"condition ({f.end_conditions})")
+                    ref=f"members: {', '.join(f.names)} — each at its own depth "
+                        f"to fixity and end condition ({f.end_conditions})")
                 _eq(add, "M_frame", "Σ mᵢ  in this direction", ms,
                     f"{f.M():.4f} kip·s²/in  "
                     f"(W = {f.M() * 386.088:.0f} kip)",
                     ref="entered tributary weight + participating column "
                         "self-weight, ÷ g")
                 T = f.T(i)
-                add(f"- **T_frame [{lbl}]** = 2π · √(M_frame / K_frame)"
+                add(f"- **T_frame [bound {i+1}]** = 2π · √(M_frame / K_frame)"
                     f"  &nbsp;*[{cr.ref_geometry}]*  ")
                 add(f"  = 2π · √({f.M():.4f} / {f.K(i):.2f}) "
                     f"= 2π · √({f.M() / f.K(i):.6f}) = **{T:.3f} s**")
